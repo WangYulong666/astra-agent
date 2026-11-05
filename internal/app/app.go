@@ -27,6 +27,7 @@ import (
 	"github.com/WangYulong666/astra-agent/internal/eventbus"
 	"github.com/WangYulong666/astra-agent/internal/lifecycle"
 	"github.com/WangYulong666/astra-agent/internal/llmwire"
+	"github.com/WangYulong666/astra-agent/internal/memory"
 	"github.com/WangYulong666/astra-agent/internal/obs"
 	"github.com/WangYulong666/astra-agent/internal/runner"
 	"github.com/WangYulong666/astra-agent/internal/sandbox"
@@ -300,12 +301,19 @@ func New(cfg Config) (*Server, error) {
 		quota = &lifecycle.Quota{Provider: prov, Store: st, MaxPerTenant: cfg.Quota}
 	}
 
+	// 可选能力：配了就开、没配就关。任何一项起不来都只记日志，
+	// 不能让「没装 Milvus」变成「平台起不来」。
+	memStore, traceSink, traceInfo := openCapabilities(lg)
+
 	info := map[string]string{
 		"provider":  prov.Name(),
 		"agent":     strings.Join(spec.Command, " "),
 		"agentName": agentLabel(cfg.Agent, spec),
 		"policy":    cfg.Policy,
 		"approval":  approvalGranularity(cfg.Agent, cfg.Policy),
+		// 让前端/CLI 一眼看出哪些能力关着，而不是点了报 503 才发现
+		"memory": boolLabel(memStore != nil && !memory.IsDisabled(memStore)),
+		"trace":  boolLabel(traceSink != nil && traceSink.Enabled()),
 	}
 	h, err := api.Handler(api.Config{
 		Manager: mgr, Store: st, Hub: s.hub, Provider: prov, Logger: lg,
@@ -316,6 +324,9 @@ func New(cfg Config) (*Server, error) {
 		Quota:       quota,
 		Info:        info,
 		LLMSettings: s.LLMSettings(),
+		Memory:      memStore, Trace: traceSink,
+		TraceEndpoint: traceInfo.Endpoint, TraceDashboardURL: traceInfo.DashboardURL,
+		TracePublicKey: traceInfo.PublicKey,
 	})
 	if err != nil {
 		st.Close()

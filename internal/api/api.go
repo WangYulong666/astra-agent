@@ -21,9 +21,11 @@ import (
 	"github.com/WangYulong666/astra-agent/internal/auth"
 	"github.com/WangYulong666/astra-agent/internal/eventbus"
 	"github.com/WangYulong666/astra-agent/internal/lifecycle"
+	"github.com/WangYulong666/astra-agent/internal/memory"
 	"github.com/WangYulong666/astra-agent/internal/runner"
 	"github.com/WangYulong666/astra-agent/internal/sandbox"
 	"github.com/WangYulong666/astra-agent/internal/store"
+	"github.com/WangYulong666/astra-agent/internal/trace"
 )
 
 // Auditor 接收审计记录。
@@ -50,6 +52,15 @@ type Config struct {
 	Admin store.AdminStore
 	// Auditor 审计。nil 时静默丢弃。
 	Auditor Auditor
+	// Memory 长期记忆（Milvus）。nil 表示未启用，API 返回 503 而不是崩。
+	Memory memory.Store
+	// Trace 观测（Langfuse）。nil 表示未启用。
+	Trace trace.Tracer
+	// TraceEndpoint / TraceDashboardURL / TracePublicKey 只用于运营页展示；
+	// secret key 留在服务端，不进这个结构。
+	TraceEndpoint     string
+	TraceDashboardURL string
+	TracePublicKey    string
 	// 是否要求认证。由启动参数决定；只有 Auth 非空且 RequireAuth 为真才强制登录。
 	RequireAuth bool
 
@@ -137,6 +148,18 @@ func Handler(cfg Config) (http.Handler, error) {
 	mux.HandleFunc("GET /v1/runs/{id}/history", h.authed(h.history, auth.ActionSessionRead))
 	mux.HandleFunc("GET /v1/runs/{id}/approvals", h.authed(h.listApprovals, auth.ActionSessionRead))
 	mux.HandleFunc("POST /v1/runs/{id}/approvals/{toolCallId}", h.authed(h.resolveApproval, auth.ActionApproval))
+
+	// ── 长期记忆（Milvus）────────────────────────────────────────
+	// 全部按「自己的 tenant+user」过滤，权限只表达「能不能用这个能力」，
+	// 不表达「能不能读别人」——后者在设计上就不存在。
+	mux.HandleFunc("POST /v1/memory/ingest", h.authed(h.memoryIngest, auth.ActionMemoryWrite))
+	mux.HandleFunc("GET /v1/memory/search", h.authed(h.memorySearch, auth.ActionMemoryRead))
+	mux.HandleFunc("GET /v1/memory/stats", h.authed(h.memoryStats, auth.ActionMemoryRead))
+	mux.HandleFunc("DELETE /v1/memory/{id}", h.authed(h.memoryDelete, auth.ActionMemoryWrite))
+
+	// ── 观测（Langfuse）──────────────────────────────────────────
+	mux.HandleFunc("GET /v1/admin/obs/config", h.authed(h.obsConfig, auth.ActionObsRead))
+	mux.HandleFunc("GET /v1/admin/obs/traces", h.authed(h.obsTraces, auth.ActionObsRead))
 
 	// 平台层路由（认证入口、管理面、沙箱、用量、契约、网关）在 platform_routes.go。
 	// 单独一个文件是因为这块会持续变长，塞进这里会把「运行时」和「治理」混在一起。

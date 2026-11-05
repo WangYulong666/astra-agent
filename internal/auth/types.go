@@ -67,6 +67,12 @@ const (
 	ActionUsageReadAll  Action = "usage:read:all" // 看全租户，不只是自己
 	ActionAuditRead     Action = "audit:read"
 	ActionTenantManage  Action = "tenant:manage"
+	// 记忆是「用户自己的东西」，member 就有读写权；但 API 层强制按 tenant+user 过滤，
+	// 所以这个权限不代表能读别人的记忆。
+	ActionMemoryRead  Action = "memory:read"
+	ActionMemoryWrite Action = "memory:write"
+	// 观测数据含 prompt 与工具入参，只给能看全租户的角色。
+	ActionObsRead Action = "obs:read"
 )
 
 // permissions 是角色到动作的白名单。刻意写成「列出允许」而不是「列出禁止」：
@@ -79,6 +85,7 @@ var permissions = map[string]map[Action]bool{
 		ActionKeyManage: true, ActionUserManage: true,
 		ActionUsageRead: true, ActionUsageReadAll: true,
 		ActionAuditRead: true, ActionTenantManage: true,
+		ActionMemoryRead: true, ActionMemoryWrite: true, ActionObsRead: true,
 	},
 	store.RoleAdmin: {
 		ActionSessionCreate: true, ActionSessionRead: true, ActionSessionDelete: true,
@@ -87,6 +94,7 @@ var permissions = map[string]map[Action]bool{
 		ActionKeyManage: true, ActionUserManage: true,
 		ActionUsageRead: true, ActionUsageReadAll: true,
 		ActionAuditRead: true,
+		ActionMemoryRead: true, ActionMemoryWrite: true, ActionObsRead: true,
 		// 没有 ActionTenantManage：管理员不能改租户本身（额度、停用、删除）。
 	},
 	store.RoleMember: {
@@ -94,6 +102,8 @@ var permissions = map[string]map[Action]bool{
 		ActionRunCreate: true, ActionRunCancel: true, ActionApproval: true,
 		ActionSandboxRead: true,
 		ActionUsageRead:   true, // 只能看自己的，由 API 层按 UserID 过滤
+		ActionMemoryRead:  true, // 同上：API 层强制按 UserID 过滤
+		ActionMemoryWrite: true,
 		// 没有 KeyManage / UserManage / AuditRead / SandboxManage：成员不能管别人。
 	},
 }
