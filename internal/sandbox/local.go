@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -625,18 +626,29 @@ func (s *localSandbox) Snapshot(ctx context.Context, name string) (string, error
 		return "", err
 	}
 
-	// -c 走 clonefile（APFS 写时复制）；源目录末尾的 / 不能丢，否则会把目录本身嵌套复制
-	if out, err := exec.CommandContext(ctx, "cp", "-c", "-R", s.m.Workspace, dst).CombinedOutput(); err == nil {
-		return dst, nil
-	} else if strings.Contains(string(out), "clonefile") || strings.Contains(string(out), "not supported") {
-		// 非 APFS（如外接 HFS+ 盘）退化为普通复制，语义不变只是慢
-		if out2, err2 := exec.CommandContext(ctx, "cp", "-R", s.m.Workspace, dst).CombinedOutput(); err2 != nil {
-			return "", fmt.Errorf("sandbox: 快照失败: %s", strings.TrimSpace(string(out2)))
+	// -c 走 clonefile（APFS 写时复制）；源目录末尾的 / 不能丢，否则会把目录本身嵌套复制。
+	//
+	// 但 -c 是 macOS 独占：GNU cp 没有这个选项，会直接报 "invalid option -- 'c'"。
+	// 原实现只在输出里含 clonefile / not supported 时才退化，Linux 上这句话两头都不沾，
+	// 于是把「参数不支持」当成了「快照失败」——CI 在 ubuntu 上红了十几次就是这个。
+	// 现在按平台分：darwin 先试写时复制，其余平台（以及非 APFS 卷）走普通复制。
+	var first string
+	if runtime.GOOS == "darwin" {
+		out, err := exec.CommandContext(ctx, "cp", "-c", "-R", s.m.Workspace, dst).CombinedOutput()
+		if err == nil {
+			return dst, nil
 		}
-		return dst, nil
-	} else {
-		return "", fmt.Errorf("sandbox: 快照失败: %s", strings.TrimSpace(string(out)))
+		first = strings.TrimSpace(string(out))
 	}
+	// 普通复制：语义与 clonefile 一致，只是慢、占实际空间
+	if out, err := exec.CommandContext(ctx, "cp", "-R", s.m.Workspace, dst).CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if first != "" {
+			msg = first + "；退化为普通复制后仍失败: " + msg
+		}
+		return "", fmt.Errorf("sandbox: 快照失败: %s", msg)
+	}
+	return dst, nil
 }
 
 // Pause 停掉进程但保留全部目录。
