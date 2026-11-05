@@ -23,6 +23,13 @@ import (
 )
 
 func main() {
+	// .env 必须在 flag.Parse 之前加载：配置项里有从环境变量读的
+	// （MILVUS_ADDR / LANGFUSE_* 等可选能力），解析完再加载就晚了。
+	// 已 export 的变量优先，方便临时覆盖。
+	if n := app.LoadDotEnv(".env", nil); n > 0 {
+		log.Printf("已从 .env 加载 %d 个变量", n)
+	}
+
 	var (
 		addr     = flag.String("addr", "127.0.0.1:7788", "监听地址")
 		dataDir  = flag.String("data", "", "数据目录（默认 ~/.astra/data）")

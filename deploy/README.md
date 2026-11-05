@@ -279,3 +279,282 @@ bash tools/check-deploy.sh     # 失败退出码非 0，可直接挂 CI 的 veri
 | 6 | Harbor 可拉 | 镜像仓库要在 k3s 的 `registries.yaml` 里配 insecure/CA |
 | 7 | 四个 Secret 已存在 | `astra-db` / `astra-auth` / `astra-llm` / `astra-cube` |
 | 8 | StorageClass `local-path` | `postgres.yaml` 的 PVC 用它；没有就改 `storageClassName` |
+
+## 依赖组件（一）：向量记忆 Milvus 与观测 Langfuse 的 compose
+
+> 上面那棵树写于本目录只有 base/apisix/compose 的时候。本轮新增：
+> `deploy/vector/`、`deploy/observability/`、`deploy/k8s/vector/`、`deploy/k8s/observability/`。
+> 树上没画出来，以本节为准。
+
+### 定位：这两套是**可选能力**
+
+缺了它们平台照常启动：`MILVUS_ADDR` 留空就是记忆关闭，`LANGFUSE_HOST` 留空就是观测关闭
+（`/v1/meta` 里能看出哪些能力关着）。所以它们**不进** `deploy/k8s/base`，
+也**不进** `make serve` 的启动路径——把可选依赖塞进主流程，等于让「没装 docker」
+阻塞整个开发流。
+
+### 服务清单与端口
+
+`deploy/vector/compose.yaml`（project 名 `astra-vector`）：
+
+| 服务 | 镜像（显式 tag） | 宿主端口 | 作用 |
+|---|---|---|---|
+| `etcd` | `quay.io/coreos/etcd:v3.5.16` | `127.0.0.1:2379` | Milvus 元数据 |
+| `seaweedfs` | `chrislusf/seaweedfs:3.71` | `127.0.0.1:8333`（S3）/ `9333`（master） | 代替 MinIO |
+| `seaweedfs-init` | 同上 | — | 一次性：建 bucket `milvus` |
+| `milvus` | `milvusdb/milvus:v2.4.15` | `127.0.0.1:19530`（gRPC）/ `9091`（metrics+healthz） | 向量库 |
+
+`deploy/observability/compose.yaml`（project 名 `astra-observability`）：
+
+| 服务 | 镜像（显式 tag） | 宿主端口 | 作用 |
+|---|---|---|---|
+| `postgres` | `postgres:16-alpine` | `127.0.0.1:5433` | Langfuse 业务库 |
+| `clickhouse` | `clickhouse/clickhouse-server:24.8` | `127.0.0.1:8123`（HTTP） | trace 存储 |
+| `valkey` | `valkey/valkey:8.0` | `127.0.0.1:6380` | 队列 + 缓存 |
+| `seaweedfs` | `chrislusf/seaweedfs:3.71` | `127.0.0.1:8334`（S3）/ `9334`（master） | 代替 MinIO |
+| `seaweedfs-init` | 同上 | — | 一次性：建 bucket `langfuse` |
+| `langfuse-web` | `langfuse/langfuse:3.227.0` | `127.0.0.1:3000` | UI + Public API |
+| `langfuse-worker` | `langfuse/langfuse-worker:3.227.0` | — | 消费队列 → 写 ClickHouse |
+
+两套的 SeaweedFS 端口刻意错开（8333/9333 vs 8334/9334），可以同时起。
+宿主端口全部绑 `127.0.0.1`：这些组件**没有**一个是面向公网的，绑 0.0.0.0
+等于把没有密码的 clickhouse / valkey 挂到局域网。
+
+### 起停
+
+```bash
+make deps-up          # 两套一起起
+make deps-status      # 逐项探测：谁没起来、该看哪条日志
+make vector-up        # 只起 Milvus
+make obs-up           # 只起 Langfuse
+make deps-down        # 停容器，保留数据
+make deps-clean       # 停 + 删数据（要输 yes；FORCE=1 跳过确认）
+```
+
+`make deps-status` 不查 `docker ps`，而是**真去探本机回环端口与健康端点**——
+因为「容器 Running」和「服务可用」是两件事（milvus 的容器能一直在 Running 而
+healthz 永远 503）。没有 docker 时它会把 9 项全报「未起来」并正常退出（exit 0），
+这是预期结果。
+
+### ⚠️ 未实机验证（必读）
+
+写这份编排的机器上**没有 docker**（`which docker` → not found），所以：
+
+| 做过 | 没做过 |
+|---|---|
+| 两份 compose 的 YAML 语法（ruby/psych 解析通过） | `docker compose up` 从未执行 |
+| `docker compose config` 的等价物**没有**跑过（需要 docker CLI） | 两套服务从未一起起过 |
+| `make -n deps-up` 打印出的命令正确 | 镜像是否能拉（Docker Hub 在本机不可达，tag 存在性未核） |
+| `make deps-status` 的「全部未启动」路径 | 探针在真依赖下是否会变绿 |
+| `bash tools/check-deploy.sh` 对新 k8s 清单全绿 | ClickHouse 建表、Langfuse 迁移是否跑得通 |
+
+**不要把「静态自检通过」当成「能起来」。** 第一次真跑请按下面的顺序排障。
+
+### 排障顺序（按依赖层次，别跳步）
+
+原则：**下层不通，上层永远起不来**，而且上层的报错通常指向错误的地方
+（milvus 会报 etcd 超时，但它真正的问题是 S3 没 bucket）。
+
+**① 基础依赖：etcd / SeaweedFS**
+
+```bash
+# etcd
+curl -sf http://127.0.0.1:2379/health && echo etcd-ok
+# SeaweedFS master
+curl -sf http://127.0.0.1:9333/cluster/status
+# bucket 是否真建了（milvus 那套）
+echo "s3.bucket.list" | docker compose -f deploy/vector/compose.yaml \
+  exec -T seaweedfs weed shell -master=127.0.0.1:9333
+# 没看到 milvus → 看 init 容器：docker compose ... logs seaweedfs-init
+```
+
+**② 数据层：milvus / clickhouse / postgres / valkey**
+
+```bash
+curl -sf http://127.0.0.1:9091/healthz && echo milvus-ok        # 这一步绿 = etcd+S3 都通
+curl -sf http://127.0.0.1:8123/ping && echo clickhouse-ok
+docker compose -f deploy/observability/compose.yaml exec postgres \
+  psql -U langfuse -d langfuse -c 'select 1'
+docker compose -f deploy/observability/compose.yaml exec valkey valkey-cli ping
+```
+
+Milvus 真的能收请求（比 healthz 更强的一步，需要 `brew install grpcurl`）：
+
+```bash
+grpcurl -plaintext 127.0.0.1:19530 list
+# 期望列出 milvus.proto.milvus.MilvusService
+grpcurl -plaintext -d '{"dbName":"default","collectionName":"astra_memory"}' \
+  127.0.0.1:19530 milvus.proto.milvus.MilvusService/DescribeCollection
+# 集合是应用第一次写入时建的：刚起完这边会返回 collection not found，这是正常的，
+# 先用 make serve + MILVUS_ADDR=127.0.0.1:19530 写一条记忆再回来看
+```
+
+**③ 应用层：langfuse-web / langfuse-worker**
+
+```bash
+curl -sf http://127.0.0.1:3000/api/public/health
+# 用自动创建的那对 key 查一次 trace（空列表 = 200 + {"data":[],"meta":...} 也是通的）
+curl -s -u pk-lf-astra-dev:sk-lf-astra-dev \
+  'http://127.0.0.1:3000/api/public/traces?limit=1'
+# clickhouse 里有没有表（没有表 = web 的迁移没跑完）
+docker compose -f deploy/observability/compose.yaml exec clickhouse \
+  clickhouse-client -u langfuse --password "$OBS_CLICKHOUSE_PASSWORD" -q 'SHOW TABLES FROM langfuse'
+```
+
+「UI 能登录但 trace 列表空」的三个常见原因，按概率排：
+1. `langfuse-worker` 没起（异步写入没人消费）
+2. bucket 不存在或 S3 凭据与 `s3.json` 不一致（上报 207 但对象写不进去）
+3. clickhouse 时区不是 UTC（时间范围查询返回空）
+
+### 版本兼容（这是本轮最容易翻车的地方）
+
+| 组件 | 本仓库钉的版本 | Langfuse v3 的要求 | 说明 |
+|---|---|---|---|
+| Langfuse | `3.227.0`（web + worker 同号） | — | ⚠️ **v3 已被上游标为 deprecated**，v4 已 GA |
+| ClickHouse | `24.8` | **≥ 24.3** | v4 的门槛是 25.12+，升 Langfuse 必须同时升 CH |
+| PostgreSQL | `16-alpine` | ≥ 12 | v4 建议 ≥ 15 |
+| Valkey / Redis | `8.0` | Redis ≥ 7 | v3 时代是 redis 7；valkey 8 协议兼容，**官方只在 v4 文档里明确列为支持** |
+| S3 | SeaweedFS 3.71 | 任意 S3 兼容 + path style | `FORCE_PATH_STYLE=true` 必须开 |
+| Milvus | `2.4.15` | — | `milvus-sdk-go/v2` 与 2.4 配套；不要跟着上游升 2.6/3.0 |
+
+三个具体风险：
+
+1. **不要单独升 Langfuse。** v3 → v4 换了写入协议（批量 ingestion → OTel 风格），
+   `internal/obs` 的 HTTP 拼装会整体失效；同时 ClickHouse 门槛从 24.3 抬到 25.12。
+2. **不要单独升 ClickHouse 到 25.x。** v3 的迁移脚本没在 25.x 上验证过；反过来
+   把 Langfuse 升到 v4 又必须升 CH —— 这两件事必须一起做，且要先备份 CH 数据。
+3. **SeaweedFS 的所有权模型与 MinIO 不同。** 预签名 URL、`ListObjectsV2` 的分页
+   行为在 SeaweedFS 上是自己实现的，Langfuse 的 media 上传（浏览器直连）是最可能
+   出问题的地方。trace 上报（服务端到服务端）风险低得多。
+
+### 许可红线（为什么不是 MinIO / redis）
+
+| 被换掉的 | 换成了 | 原因 |
+|---|---|---|
+| MinIO | SeaweedFS（Apache-2.0） | MinIO 社区版 AGPLv3 |
+| redis ≥ 7.4 | valkey 8（BSD-3-Clause） | redis 7.4 起 RSALv2/SSPLv1 |
+
+SeaweedFS 的 `identities` 一旦非空就拒绝匿名请求；空 identities 时它**默认放行匿名读写**，
+所以 `deploy/*/seaweedfs/s3.json` 里必须配 identities（现在配了开发用 key）。
+生产把那两个 key 换成 Secret 挂载，别提交真值。
+
+### 要覆盖默认值时改哪里
+
+两套 compose 的所有可调项都是**环境变量 + 内置默认值**（默认值是开发用的，能直接跑）。
+覆盖方式（优先级从高到低）：
+
+```bash
+export OBS_PG_PASSWORD=...        # 1) 当前 shell
+# 2) deploy/vector/.env  /  deploy/observability/.env —— compose 默认会读「项目目录」的 .env
+#    （.gitignore 里的 `.env` 规则对任意层级生效，不会被提交）
+# 3) 直接改 compose 里的默认值（不推荐：一次本地改动容易跟着提交上去）
+```
+
+| 变量 | 默认 | 用途 |
+|---|---|---|
+| `MILVUS_S3_ACCESS_KEY` / `MILVUS_S3_SECRET_KEY` / `MILVUS_S3_BUCKET` | `astra-dev-key` / `astra-dev-secret-change-me` / `milvus` | Milvus 连 SeaweedFS 的凭据，**必须与 `deploy/vector/seaweedfs/s3.json` 一致** |
+| `OBS_PG_USER` / `OBS_PG_PASSWORD` / `OBS_PG_DB` | `langfuse` / `langfuse-dev-password` / `langfuse` | Langfuse 业务库 |
+| `OBS_CLICKHOUSE_USER` / `OBS_CLICKHOUSE_PASSWORD` / `OBS_CLICKHOUSE_DB` | 同上 | trace 库 |
+| `LANGFUSE_S3_ACCESS_KEY` / `LANGFUSE_S3_SECRET_KEY` / `LANGFUSE_S3_BUCKET` | `langfuse-dev-key` / … / `langfuse` | 事件与媒体 bucket，须与 `deploy/observability/seaweedfs/s3.json` 一致 |
+| `LANGFUSE_NEXTAUTH_SECRET` / `LANGFUSE_SALT` / `LANGFUSE_ENCRYPTION_KEY` | 开发占位值 | 会话签名 / key 哈希盐 / 字段加密；**生产必须换**，`ENCRYPTION_KEY` 要 64 位 hex |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | `pk-lf-astra-dev` / `sk-lf-astra-dev` | 首启自动建的那对 key（要填进 `.env.example` 的同名变量） |
+| `LANGFUSE_MEDIA_ENDPOINT` | `http://127.0.0.1:8334` | 浏览器访问附件的地址（预签名 URL 的 host） |
+
+`LANGFUSE_ENCRYPTION_KEY` 换了之后**已加密的旧数据解不开**（比如已有的集成凭据），
+换之前先确认库里没有需要保留的加密字段。
+
+### 数据卷
+
+```
+deploy/vector/data/{etcd,seaweedfs,milvus}
+deploy/observability/data/{postgres,clickhouse,clickhouse-logs,valkey,seaweedfs}
+```
+
+已加进 `.gitignore`。`deps-down` 不动它们，`deps-clean` 才删。
+
+### 静态校验（没有 docker 时唯一能做的）
+
+```bash
+# YAML 合法性（本机没有 pyyaml，用 macOS 自带 ruby）
+ruby -ryaml -e 'YAML.load_stream(File.read("deploy/vector/compose.yaml")); puts "ok"'
+ruby -ryaml -e 'YAML.load_stream(File.read("deploy/observability/compose.yaml")); puts "ok"'
+
+# 镜像 tag 必须显式（不接受 latest）
+grep -nE '^\s+image:' deploy/vector/compose.yaml deploy/observability/compose.yaml
+```
+
+## 依赖组件（二）：k8s 清单（vector / observability）
+
+### 文件
+
+```
+deploy/k8s/vector/
+├── kustomization.yaml
+├── namespace.yaml          # astra-data（与 base/namespace.yaml 内容一致的自足副本）
+├── etcd.yaml               # StatefulSet + headless Svc + PVC(5Gi)
+├── seaweedfs.yaml          # Deployment(Recreate) + Svc + PVC(50Gi)
+├── bucket-init.yaml        # Job：建 bucket milvus
+├── milvus.yaml             # StatefulSet + Svc(19530/9091) + PVC(20Gi)
+└── secret.example.yaml     # vector-s3（access-key / secret-key / s3.json）
+
+deploy/k8s/observability/
+├── kustomization.yaml
+├── namespace.yaml          # astra-ops
+├── postgres.yaml           # StatefulSet + headless Svc + PVC(20Gi)
+├── clickhouse.yaml         # StatefulSet + Svc(8123/9000) + PVC(50Gi+5Gi 日志)
+├── valkey.yaml             # Deployment(Recreate) + Svc + PVC(5Gi)
+├── seaweedfs.yaml          # Deployment + Svc + PVC(50Gi) + Job(建 bucket)
+├── langfuse.yaml           # ConfigMap + Deployment(web) + Deployment(worker) + Svc(3000)
+└── secret.example.yaml     # langfuse-db / langfuse-secret / langfuse-s3
+```
+
+两个命名空间是**复用**已有的分层（`astra-data` / `astra-ops`），不是新造的。
+
+### 用之前
+
+```bash
+kubectl apply -k deploy/k8s/vector
+kubectl apply -k deploy/k8s/observability
+
+# 先看基础设施（三个 StatefulSet 都要 Ready）
+kubectl -n astra-data get sts,pod
+kubectl -n astra-ops  get sts,deploy,pod
+# bucket Job 必须是 Complete（否则 milvus / langfuse 起来后会一直报 no such bucket）
+kubectl -n astra-data wait --for=condition=complete job/vector-bucket-init --timeout=300s
+kubectl -n astra-ops  wait --for=condition=complete job/langfuse-bucket-init --timeout=300s
+# milvus 就绪
+kubectl -n astra-data rollout status sts/milvus --timeout=600s
+# langfuse 就绪（先 web 再 worker：worker 依赖 web 跑完 clickhouse 迁移）
+kubectl -n astra-ops rollout status deploy/langfuse-web --timeout=600s
+kubectl -n astra-ops rollout status deploy/langfuse-worker --timeout=300s
+```
+
+Secret 必须先建（清单里的 `secret.example.yaml` **不参与 apply**，只说明需要哪些键）：
+
+```bash
+kubectl -n astra-data create secret generic vector-s3 \
+  --from-literal=access-key='...' --from-literal=secret-key='...' \
+  --from-file=s3.json=./s3-rendered.json
+# langfuse-db / langfuse-secret / langfuse-s3 的命令见 observability/secret.example.yaml 顶部
+```
+
+### 与 compose 的差异（别照着 compose 的端口去 k8s 里找）
+
+| 项 | compose | k8s |
+|---|---|---|
+| 对外暴露 | 宿主回环端口 | 只有 ClusterIP，**没有 Ingress** |
+| 存储 | `./data/<svc>` | `local-path` PVC |
+| 副本 | 1 | 1（clickhouse/milvus/pg 都是单点） |
+| 依赖顺序 | `depends_on` + healthcheck | 探针 + 探针导致的 CrashLoop 重试 |
+
+**k8s 侧的已知缺口**（不要以为已经能上生产）：
+
+1. `LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT` 指的是集群内地址 → **UI 里点开附件会 404**。
+   要修得先决定入口方案（APISIX 的路由 + 一个能转发到 `langfuse-seaweedfs:8333`
+   的规则），那是独立的一件事，硬编一个域名只会让 apply 失败。
+2. `LANGFUSE_HOST` 消费者（`astra-api`）还没有对应的 flag/环境变量接入点——
+   属于 obs 模块与主控的接口，不在本目录。
+3. 没有 NetworkPolicy：`astra-ops` 里的 clickhouse/valkey 对外是「集群内谁都能连」。
+4. clickhouse 单副本 = 数据只有一个节点上的一份。要正经用，先上 ClickHouse Operator
+   （Langfuse 官方推荐的形态），而不是给这个 StatefulSet 加 replicas。
+5. 本目录清单与上一节一样：**未经真实集群验证**（本机没有 kubectl）。

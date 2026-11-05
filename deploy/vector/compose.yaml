@@ -1,0 +1,167 @@
+# Milvus 全家桶：milvus + etcd（元数据）+ SeaweedFS（对象存储）
+#
+# 能验证什么：
+#   向量集合建表 / 写入 / 检索 / 删除（internal/memory 的 Put、Search、Delete）
+#
+# 不能验证什么：
+#   多副本、高可用、跨机房——这里是 standalone 单节点。
+#
+# ── 两个刻意的取舍 ──────────────────────────────────────────────
+# 1) **不用 MinIO**。MinIO 社区版是 AGPLv3，是项目红线（见 docs/design/platform-extension.md
+#    第二节）。用 SeaweedFS 顶替：Apache-2.0，S3 兼容，Milvus 只把它当成一个 S3 endpoint。
+# 2) **etcd 不用 latest**。Milvus 2.4 对 etcd 版本敏感（3.6 改过 gRPC 网关与鉴权默认值），
+#    钉 3.5.16 与 Milvus 官方 compose 一致。
+#
+# 用法：
+#   docker compose -f deploy/vector/compose.yaml up -d
+#   curl -f http://127.0.0.1:9091/healthz        # milvus 就绪
+#   make deps-status                              # 一次看全部
+#
+# ⚠️ 本文件**未在真机上跑过**（写它的机器没有 docker）。静态校验通过的只有 YAML 合法性，
+#    以及镜像 tag 是否显式。详见 deploy/README.md「依赖组件」一节。
+
+name: astra-vector
+
+# 日志上限：不设的话 json-file 驱动会把磁盘吃满（milvus 日志量不小）
+x-logging: &default-logging
+  driver: json-file
+  options:
+    # 单文件 10MB × 3 个，单服务最多占 30MB
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ── 元数据 ──────────────────────────────────────────────────
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.16
+    container_name: astra-vector-etcd
+    # 单节点、单成员。--advertise-client-urls 必须写服务名 etcd，
+    # 否则 milvus 拿到的是容器内 IP，重启后 IP 变了就连不上。
+    command:
+      - etcd
+      - --name=astra-etcd
+      - --data-dir=/etcd-data
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      # 配额给足：milvus 的 collection schema 变更会写不少 key
+      - --quota-backend-bytes=4294967296
+      - --log-level=warn
+    ports:
+      # 只绑回环，宿主机调试用（etcdctl --endpoints=127.0.0.1:2379 endpoint health）
+      - "127.0.0.1:2379:2379"
+    volumes:
+      - ./data/etcd:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── 对象存储（代替 MinIO）───────────────────────────────────
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.71
+    container_name: astra-vector-seaweedfs
+    # server 一把梭：master + volume + filer + s3 gateway 都在一个进程里。
+    # -dir 是唯一需要持久化的路径（元数据 + 分片 + filer 元信息）。
+    command:
+      - server
+      - -dir=/data
+      - -s3
+      - -s3.port=8333
+      - -s3.config=/etc/seaweedfs/s3.json
+      # volume 分片上限调大，减少小分片数量（本地开发数据量小，纯粹为了少建文件）
+      - -master.volumeSizeLimitMB=1024
+    ports:
+      # 8333 = S3 API（milvus 走这个），9333 = master（建 bucket / 观察拓扑）
+      - "127.0.0.1:8333:8333"
+      - "127.0.0.1:9333:9333"
+    volumes:
+      - ./data/seaweedfs:/data
+      # 访问凭据。⚠️ 仓库里这份是**开发用**的固定 key，生产必须换（见文件内注释）
+      - ./seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      # master 的 /cluster/status 是 SeaweedFS 自带的只读端点，不依赖 S3 鉴权
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9333/cluster/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+    logging: *default-logging
+
+  # 一次性容器：建 bucket。
+  # 为什么不用 milvus 自己建：milvus 2.4 在 bucket 不存在时会尝试创建，但 SeaweedFS 上
+  # 这个自动创建路径依赖 S3 的 CreateBucket 语义，失败时 milvus 只会在日志里刷
+  # "no such bucket"，然后 healthz 一直绿（误导性极强）。显式建一次更省事。
+  seaweedfs-init:
+    image: chrislusf/seaweedfs:3.71
+    container_name: astra-vector-seaweedfs-init
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          if echo "s3.bucket.create -name $${S3_BUCKET}" \
+               | weed shell -master=seaweedfs:9333 2>&1 | grep -qiE 'created|exists'; then
+            echo "bucket $${S3_BUCKET} 就绪"
+            exit 0
+          fi
+          echo "第 $$i 次建 bucket 未成功，2s 后重试"
+          sleep 2
+        done
+        echo "建 bucket 失败：请 docker compose -f deploy/vector/compose.yaml logs seaweedfs" >&2
+        exit 1
+    environment:
+      # 与 milvus 的 MINIO_BUCKET_NAME 必须一致
+      S3_BUCKET: ${MILVUS_S3_BUCKET:-milvus}
+    restart: "no"
+    logging: *default-logging
+
+  # ── 向量库 ──────────────────────────────────────────────────
+  milvus:
+    image: milvusdb/milvus:v2.4.15
+    container_name: astra-vector-milvus
+    command: ["milvus", "run", "standalone"]
+    # 官方 compose 也是这么写的：milvus 内部用了 io_uring 相关系统调用，
+    # 默认 seccomp profile 会拦掉一部分，表现为启动后卡在 "wait for etcd"。
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      # 名字叫 MINIO_* 是历史包袱：milvus 只认 S3 协议，端点是谁无所谓
+      MINIO_ADDRESS: seaweedfs:8333
+      MINIO_ACCESS_KEY_ID: ${MILVUS_S3_ACCESS_KEY:-astra-dev-key}
+      MINIO_SECRET_KEY: ${MILVUS_S3_SECRET_KEY:-astra-dev-secret-change-me}
+      MINIO_BUCKET_NAME: ${MILVUS_S3_BUCKET:-milvus}
+      MINIO_USE_SSL: "false"
+      # 时区固定 UTC：本地开发机是 CST 的话，日志和 TTL 计算会差 8 小时
+      TZ: UTC
+    ports:
+      - "127.0.0.1:19530:19530"   # gRPC（MILVUS_ADDR 用这个）
+      - "127.0.0.1:9091:9091"     # metrics + /healthz
+    volumes:
+      - ./data/milvus:/var/lib/milvus
+    depends_on:
+      etcd:
+        condition: service_healthy
+      # 必须等 bucket 建完：milvus 起来后第一件事就是读 bucket 里的 segment 清单
+      seaweedfs-init:
+        condition: service_completed_successfully
+    healthcheck:
+      # 镜像自带 curl。milvus 的 /healthz 只有在 etcd 与对象存储都通了之后才返回 200，
+      # 所以它同时也覆盖了「依赖链是否健康」。
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      # 首次启动要初始化 WAL + 连 etcd，30s 起步，给足 90s
+      start_period: 90s
+    restart: unless-stopped
+    logging: *default-logging

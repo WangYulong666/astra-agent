@@ -213,3 +213,110 @@ check: ## 质量门：gofmt 检查 + go vet + go test + 前端测试（一条跑
 	go vet ./cmd/... ./internal/...
 	go test ./cmd/... ./internal/... -count=1 -timeout 120s
 	cd $(WEB) && $(NPM) test
+
+# ── 依赖组件（Milvus / Langfuse）──────────────────────────────
+#
+# 这两套是**可选能力**，刻意不并进 make serve 的启动路径：
+# 起不来的时候平台照常可用，只是记忆 / 观测关闭（/v1/meta 里能看出来）。
+# 把它们塞进 `make serve` 的依赖里，等于让「没装 docker」这件事阻塞整个开发流。
+#
+# 数据落在 deploy/<模块>/data/（已 gitignore，见 deploy/README.md）：
+#   deps-down  保留数据（容器没了，collection 与 trace 还在）
+#   deps-clean 才删数据（要二次确认）
+
+COMPOSE     ?= docker compose
+VECTOR_DIR  := deploy/vector
+OBS_DIR     := deploy/observability
+VECTOR_YAML := $(VECTOR_DIR)/compose.yaml
+OBS_YAML    := $(OBS_DIR)/compose.yaml
+
+.PHONY: vector-up
+vector-up: ## 起 Milvus 全家桶（etcd + SeaweedFS + milvus）
+	@$(COMPOSE) -f $(VECTOR_YAML) up -d
+	@echo "→ milvus 首次启动要 60-90s 才 ready；用 make deps-status 看进度"
+
+.PHONY: vector-down
+vector-down: ## 停 Milvus 全家桶（保留 deploy/vector/data）
+	@$(COMPOSE) -f $(VECTOR_YAML) down 2>/dev/null || true
+	@echo "→ 容器已停，deploy/vector/data 保留"
+
+.PHONY: obs-up
+obs-up: ## 起 Langfuse 全家桶（pg + clickhouse + valkey + SeaweedFS + web/worker）
+	@$(COMPOSE) -f $(OBS_YAML) up -d
+	@echo "→ langfuse-web 首启要跑两次迁移，1-2 分钟；用 make deps-status 看进度"
+
+.PHONY: obs-down
+obs-down: ## 停 Langfuse 全家桶（保留 deploy/observability/data）
+	@$(COMPOSE) -f $(OBS_YAML) down 2>/dev/null || true
+	@echo "→ 容器已停，deploy/observability/data 保留"
+
+.PHONY: deps-up
+deps-up: vector-up obs-up ## 起全部依赖（向量 + 观测）
+	@printf '\n→ 30-120s 后跑 make deps-status 确认；首次拉镜像会更久\n'
+
+.PHONY: deps-down
+deps-down: ## 停全部依赖容器（保留数据）
+	@$(COMPOSE) -f $(VECTOR_YAML) down 2>/dev/null || true
+	@$(COMPOSE) -f $(OBS_YAML) down 2>/dev/null || true
+	@echo "→ 容器已停，数据还在 deploy/*/data/；连数据一起删用 make deps-clean"
+
+.PHONY: deps-clean
+deps-clean: ## 停全部依赖并删除数据（二次确认；FORCE=1 跳过）
+	@printf '\033[33m⚠️  即将删除：\033[0m\n'
+	@printf '    %s/data/   %s/data/\n' '$(VECTOR_DIR)' '$(OBS_DIR)'
+	@printf '    含 Milvus collection、Langfuse 的 trace 与登录账号 —— 删了不可恢复。\n'
+	@if [ "$(FORCE)" = "1" ]; then echo "FORCE=1，跳过确认"; \
+	elif [ ! -t 0 ]; then echo "非交互环境，未确认，已取消（要跳过确认用 make deps-clean FORCE=1）"; exit 1; \
+	else \
+	  printf '确认请输入 yes：'; read confirm; \
+	  [ "$$confirm" = "yes" ] || { echo "已取消"; exit 1; }; \
+	fi
+	@$(COMPOSE) -f $(VECTOR_YAML) down --volumes --remove-orphans 2>/dev/null || true
+	@$(COMPOSE) -f $(OBS_YAML) down --volumes --remove-orphans 2>/dev/null || true
+	@rm -rf $(VECTOR_DIR)/data $(OBS_DIR)/data
+	@echo "→ 已清空"
+
+.PHONY: deps-status
+deps-status: ## 逐个探测依赖的端口/健康端点，输出「谁没起来」
+	@miss=0; total=0; \
+	printf '\n\033[1m依赖组件状态\033[0m（探本机回环端口，不看 docker 状态）\n'; \
+	if command -v docker >/dev/null 2>&1; then printf '  docker: 可用\n'; \
+	else printf '  docker: \033[33m未安装\033[0m —— 全部显示「未起来」是预期结果，不是配置错\n'; fi; \
+	printf '\n'; \
+	port_open() { (echo > /dev/tcp/$${1%:*}/$${1##*:}) >/dev/null 2>&1; }; \
+	http_ok()   { curl -sf -m 3 -o /dev/null "$$1"; }; \
+	check() { \
+	  total=$$((total+1)); \
+	  if ! port_open "$$2"; then \
+	    miss=$$((miss+1)); \
+	    printf '  \033[31m✗\033[0m %-14s %s 未起来：%s 端口无响应，先看 %s\n' "$$1" "$$1" "$$2" "$$4"; \
+	  elif [ -n "$$3" ]; then \
+	    if http_ok "$$3"; then \
+	      printf '  \033[32m✓\033[0m %-14s %s 200\n' "$$1" "$$3"; \
+	    else \
+	      miss=$$((miss+1)); \
+	      printf '  \033[33m!\033[0m %-14s %s 端口通了但健康端点没绿（%s），再等 30s；仍不行看 %s\n' "$$1" "$$1" "$$3" "$$4"; \
+	    fi; \
+	  else \
+	    printf '  \033[32m✓\033[0m %-14s %s 可连（该组件没有 HTTP 健康端点）\n' "$$1" "$$2"; \
+	  fi; \
+	}; \
+	printf '\033[36m— vector：etcd + SeaweedFS + Milvus —\033[0m\n'; \
+	check etcd       127.0.0.1:2379 http://127.0.0.1:2379/health '$(COMPOSE) -f $(VECTOR_YAML) logs etcd'; \
+	check SeaweedFS  127.0.0.1:9333 http://127.0.0.1:9333/cluster/status '$(COMPOSE) -f $(VECTOR_YAML) logs seaweedfs'; \
+	check S3-vector  127.0.0.1:8333 '' '$(COMPOSE) -f $(VECTOR_YAML) logs seaweedfs'; \
+	check Milvus     127.0.0.1:19530 http://127.0.0.1:9091/healthz '$(COMPOSE) -f $(VECTOR_YAML) logs milvus'; \
+	printf '\n\033[36m— observability：Postgres + ClickHouse + Valkey + SeaweedFS + Langfuse —\033[0m\n'; \
+	check Postgres   127.0.0.1:5433 '' '$(COMPOSE) -f $(OBS_YAML) logs postgres'; \
+	check ClickHouse 127.0.0.1:8123 http://127.0.0.1:8123/ping '$(COMPOSE) -f $(OBS_YAML) logs clickhouse'; \
+	check Valkey     127.0.0.1:6380 '' '$(COMPOSE) -f $(OBS_YAML) logs valkey'; \
+	check S3-observe 127.0.0.1:8334 '' '$(COMPOSE) -f $(OBS_YAML) logs seaweedfs'; \
+	check Langfuse   127.0.0.1:3000 http://127.0.0.1:3000/api/public/health '$(COMPOSE) -f $(OBS_YAML) logs langfuse-web'; \
+	printf '\n'; \
+	if [ $$miss -eq 0 ]; then \
+	  printf '\033[32m全部 %d 项就绪\033[0m\n' $$total; \
+	else \
+	  printf '%d/%d 项未就绪。首次启动要等 1-2 分钟（milvus 建 WAL、langfuse 跑迁移）。\n' $$miss $$total; \
+	  printf '排障顺序见 deploy/README.md：先基础依赖（etcd/S3 → milvus / clickhouse）再应用层。\n'; \
+	fi; \
+	exit 0

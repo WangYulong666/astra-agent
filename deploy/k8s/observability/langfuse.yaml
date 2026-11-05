@@ -1,0 +1,222 @@
+# Langfuse v3（web + worker）
+#
+# ── 为什么是两个 Deployment ────────────────────────────────────
+# v3 的写入是异步的：web 只把上报事件写进 S3 + redis 队列，**worker** 才把它们
+# 落进 clickhouse。只起 web 的症状特别有迷惑性：UI 能登录、能建 key、
+# POST /api/public/ingestion 返回 207，但 trace 列表永远是空的。
+#
+# ── 环境变量为什么分三处 ──────────────────────────────────────
+#   ConfigMap langfuse-config   非敏感配置（端点、库名、开关）
+#   Secret langfuse-db          DATABASE_URL（含 PG 密码）与 clickhouse 密码
+#   Secret langfuse-secret      NEXTAUTH_SECRET / SALT / ENCRYPTION_KEY / API key
+#   Secret langfuse-s3          S3 凭据（与 SeaweedFS 的 s3.json 必须一致）
+# 三者都通过 $(VAR) 之外的原生 env 注入——Langfuse 是真读环境变量的程序
+# （与 astra-server 只认 flag 不同，这里不需要 args 转发）。
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: langfuse-config
+  namespace: astra-ops
+data:
+  # ── ClickHouse：两个地址都要给 ──
+  # CLICKHOUSE_URL        给查询用（HTTP 8123）
+  # CLICKHOUSE_MIGRATION_URL 给启动时建表用（native 9000）
+  # 只给前者是 v3 最经典的踩坑：迁移静默跳过，运行时报表不存在
+  CLICKHOUSE_URL: "http://clickhouse.astra-ops.svc:8123"
+  CLICKHOUSE_MIGRATION_URL: "clickhouse://clickhouse.astra-ops.svc:9000"
+  CLICKHOUSE_USER: "langfuse"
+  CLICKHOUSE_DB: "langfuse"
+  # 单容器 clickhouse，不能发 ON CLUSTER 语句
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  # ── 队列 / 缓存 ──
+  REDIS_CONNECTION_STRING: "redis://valkey.astra-ops.svc:6379"
+  # ── S3（SeaweedFS）──
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: "langfuse"
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: "auto"
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: "http://langfuse-seaweedfs.astra-ops.svc:8333"
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: "events/"
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: "langfuse"
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: "auto"
+  # ⚠️ 这个端点是**浏览器**要访问的，必须是集群外的可达地址。
+  # 现状留的是集群内地址 = 附件在 UI 里打不开（见 README「未做到」）。
+  # 接好入口后改成 https://obs.example.com/s3 之类。
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: "http://langfuse-seaweedfs.astra-ops.svc:8333"
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: "media/"
+  LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+  # ── 应用 ──
+  NEXTAUTH_URL: "http://langfuse.astra-ops.svc:3000"
+  # 关遥测：默认会把实例版本信息发回上游
+  TELEMETRY_ENABLED: "false"
+  # Node 堆上限贴着 limits=2Gi，显式压到 1.5Gi 留余量
+  NODE_OPTIONS: "--max-old-space-size=1536"
+  # 首启自动建 org / project / 一对 key（仅在库为空时生效）
+  LANGFUSE_INIT_ORG_ID: "astra"
+  LANGFUSE_INIT_ORG_NAME: "Astra"
+  LANGFUSE_INIT_PROJECT_ID: "astra-default"
+  LANGFUSE_INIT_PROJECT_NAME: "astra"
+  LANGFUSE_INIT_PROJECT_PUBLIC_KEY: "pk-lf-astra"
+  LANGFUSE_INIT_USER_EMAIL: "admin@astra.local"
+  LANGFUSE_INIT_USER_NAME: "admin"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-web
+  namespace: astra-ops
+  labels: { app: langfuse-web }
+spec:
+  # 单副本：审批/会话无关，但 v3 的 web 启动时会跑 prisma 迁移，
+  # 多副本同时启动会在 PG 上抢同一把 DDL 锁（会成功，但日志吓人、冷启动变慢）。
+  # 真要多副本，先把 replicas 提到 2 并接受启动期短暂重试。
+  replicas: 1
+  selector:
+    matchLabels: { app: langfuse-web }
+  template:
+    metadata:
+      labels: { app: langfuse-web }
+    spec:
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: web
+          image: langfuse/langfuse:3.227.0
+          ports:
+            - { name: http, containerPort: 3000 }
+          envFrom:
+            - configMapRef: { name: langfuse-config }
+          env:
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: langfuse-db, key: dsn } }
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom: { secretKeyRef: { name: langfuse-db, key: clickhouse-password } }
+            - name: NEXTAUTH_SECRET
+              valueFrom: { secretKeyRef: { name: langfuse-secret, key: nextauth-secret } }
+            - name: SALT
+              valueFrom: { secretKeyRef: { name: langfuse-secret, key: salt } }
+            - name: ENCRYPTION_KEY
+              valueFrom: { secretKeyRef: { name: langfuse-secret, key: encryption-key } }
+            - name: LANGFUSE_INIT_PROJECT_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: langfuse-secret, key: init-secret-key } }
+            - name: LANGFUSE_INIT_USER_PASSWORD
+              valueFrom: { secretKeyRef: { name: langfuse-secret, key: init-user-password } }
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: langfuse-s3, key: access-key } }
+            - name: LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: langfuse-s3, key: secret-key } }
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: langfuse-s3, key: access-key } }
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: langfuse-s3, key: secret-key } }
+          # 探针用 exec + node：Langfuse 镜像不一定有 wget/curl，但一定有 node。
+          # /api/public/health 是它自带的公开健康端点（无需鉴权）。
+          livenessProbe:
+            exec:
+              command:
+                - node
+                - -e
+                - "fetch('http://127.0.0.1:3000/api/public/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+            initialDelaySeconds: 120
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            exec:
+              command:
+                - node
+                - -e
+                - "fetch('http://127.0.0.1:3000/api/public/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 250m, memory: 1Gi }
+            limits:   { memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-worker
+  namespace: astra-ops
+  labels: { app: langfuse-worker }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: langfuse-worker }
+  template:
+    metadata:
+      labels: { app: langfuse-worker }
+    spec:
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: langfuse/langfuse-worker:3.227.0
+          ports:
+            - { name: health, containerPort: 3030 }
+          envFrom:
+            - configMapRef: { name: langfuse-config }
+          env:
+            # worker 也要迁移相关配置：它会在自己的进程里跑 clickhouse 迁移检查
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: langfuse-db, key: dsn } }
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom: { secretKeyRef: { name: langfuse-db, key: clickhouse-password } }
+            - name: NEXTAUTH_SECRET
+              valueFrom: { secretKeyRef: { name: langfuse-secret, key: nextauth-secret } }
+            - name: SALT
+              valueFrom: { secretKeyRef: { name: langfuse-secret, key: salt } }
+            - name: ENCRYPTION_KEY
+              valueFrom: { secretKeyRef: { name: langfuse-secret, key: encryption-key } }
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: langfuse-s3, key: access-key } }
+            - name: LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: langfuse-s3, key: secret-key } }
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: langfuse-s3, key: access-key } }
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: langfuse-s3, key: secret-key } }
+          livenessProbe:
+            exec:
+              command:
+                - node
+                - -e
+                - "fetch('http://127.0.0.1:3030/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            exec:
+              command:
+                - node
+                - -e
+                - "fetch('http://127.0.0.1:3030/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 250m, memory: 768Mi }
+            limits:   { memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse
+  namespace: astra-ops
+  labels: { app: langfuse-web }
+spec:
+  selector: { app: langfuse-web }
+  ports:
+    # LANGFUSE_HOST 指向 http://langfuse.astra-ops.svc:3000
+    - { name: http, port: 3000, targetPort: http }

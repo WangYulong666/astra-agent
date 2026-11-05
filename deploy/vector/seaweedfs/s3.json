@@ -1,0 +1,27 @@
+{
+  "_comment": [
+    "SeaweedFS 的 S3 访问凭据（-s3.config 指向本文件）。",
+    "!! 这份 key 是**开发默认值**，与 compose.yaml 里 MINIO_ACCESS_KEY_ID / MINIO_SECRET_KEY 的默认值一致。",
+    "!! 生产：不要把真 key 提交进仓库，改为把本文件做成 Secret 挂进来（k8s 见 deploy/k8s/vector/）。",
+    "identities 一旦非空，SeaweedFS 就**拒绝匿名请求**——这正是我们要的：",
+    "不配 identities 时 SeaweedFS 默认放行匿名读写，本地端口一旦被转发出去就是敞开的数据盘。"
+  ],
+  "identities": [
+    {
+      "name": "astra-dev",
+      "credentials": [
+        {
+          "accessKey": "astra-dev-key",
+          "secretKey": "astra-dev-secret-change-me"
+        }
+      ],
+      "actions": [
+        "Admin",
+        "Read",
+        "Write",
+        "List",
+        "Tagging"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: astra-data
+
+# 依赖服务（Milvus 全家桶）。
+#
+# 刻意**不**放进 deploy/k8s/base：它们是可选能力。base 是「平台本体」，
+# 缺了 milvus 平台照常可用（记忆能力关闭），缺了 API 平台就没了。
+# 把两类东西混进一个 kustomization，会让「只想升级 api」变成「顺手改了向量库版本」。
+#
+# 顺序提示：etcd/seaweedfs 先起（有 PVC 与探针），bucket-init 是 Job，
+# milvus 的 readiness 会一直红到依赖就绪为止——所以 apply 的先后不是正确性前提。
+resources:
+  - namespace.yaml
+  - seaweedfs.yaml
+  - bucket-init.yaml
+  - etcd.yaml
+  - milvus.yaml
+
+# 与 base 一样：secret.example.yaml 刻意不在 resources 里（假值，不该进集群）。
+#
+# 这里**没有** images/newTag 块：三个外部镜像在各文件里就写死了显式 tag，
+# 再加一层 newTag 就有了两个版本事实来源，迟早对不上。
+# 升级 = 改对应 yaml 的 image 字段（commit 里有 diff，比改一个隐形覆盖项更好审）。

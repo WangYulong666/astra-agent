@@ -33,6 +33,7 @@ import (
 	"github.com/WangYulong666/astra-agent/internal/sandbox"
 	"github.com/WangYulong666/astra-agent/internal/store"
 	"github.com/WangYulong666/astra-agent/internal/store/sqlstore"
+	"github.com/WangYulong666/astra-agent/internal/trace"
 )
 
 // Config 是控制面的全部可调参数。零值不合法，入口必须显式给。
@@ -107,6 +108,10 @@ type Server struct {
 	hub    *eventbus.Hub
 	reaper *lifecycle.Reaper
 	auth   *auth.Service
+	// 全局事件旁路的停止函数（trace 上报、记忆入库）。
+	// 必须在关存储之前调用：它们可能还在写，先停再关。
+	stopTrace func()
+	stopMem   func()
 
 	meta map[string]string
 
@@ -304,6 +309,10 @@ func New(cfg Config) (*Server, error) {
 	// 可选能力：配了就开、没配就关。任何一项起不来都只记日志，
 	// 不能让「没装 Milvus」变成「平台起不来」。
 	memStore, traceSink, traceInfo := openCapabilities(lg)
+	// 两个旁路都订阅 hub 的全局事件。Hub 已支持多消费者（追加语义），
+	// 谁先装配都不会把对方顶掉。
+	s.stopTrace = trace.Attach(s.hub, traceSink, st)
+	s.stopMem = memory.AttachWith(memStore, s.hub, st, lg)
 
 	info := map[string]string{
 		"provider":  prov.Name(),
@@ -394,6 +403,14 @@ func (s *Server) Close() error {
 		return nil
 	}
 	s.closed = true
+	// 先停旁路：trace 要把缓冲刷出去、记忆要等在飞的写入落库，
+	// 都依赖存储还活着，所以顺序不能反。
+	if s.stopTrace != nil {
+		s.stopTrace()
+	}
+	if s.stopMem != nil {
+		s.stopMem()
+	}
 	return s.st.Close()
 }
 

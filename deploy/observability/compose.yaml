@@ -1,0 +1,295 @@
+# Langfuse v3 依赖链：postgres（业务库）+ clickhouse（trace 库）+ valkey（队列/缓存）+ SeaweedFS（S3）
+#
+# 能验证什么：
+#   trace 写入 → Langfuse UI / GET /api/public/traces 能查到；
+#   internal/obs 的 Ingestion HTTP API 上报链路（POST /api/public/ingestion）。
+#
+# 不能验证什么：
+#   高可用、水平扩容、备份。这里是单机 compose，Langfuse 官方也明说这套「
+#   缺少 HA / 扩容 / 备份能力」，只适合试点。
+#
+# ── 几个刻意的取舍 ──────────────────────────────────────────────
+# 1) **不用 MinIO**（AGPLv3，项目红线）。用 SeaweedFS（Apache-2.0）顶 S3。
+#    Langfuse 只要求「S3 兼容 + path style」，SeaweedFS 满足。
+# 2) **不用 redis ≥7.4**。redis 7.4 起改 RSALv2/SSPLv1 双许可，不再是 BSD。
+#    用 valkey 8（BSD-3-Clause，Linux 基金会 fork），RESP 协议兼容。
+# 3) **langfuse 与 langfuse-worker 都要起**。v3 的写入路径是异步的：
+#    web 只把事件丢进 S3 + redis 队列，**worker** 才把它们落到 clickhouse。
+#    只起 web 的症状是「UI 能打开、能建 key，但 trace 列表永远是空的」。
+# 4) **必须给 CLICKHOUSE_MIGRATION_URL**（native 9000 端口）。只给 CLICKHOUSE_URL(8123)
+#    时，web 的启动迁移会失败或跳过，表现为「表不存在」。
+#
+# 用法：
+#   docker compose -f deploy/observability/compose.yaml up -d
+#   curl -sf http://127.0.0.1:3000/api/public/health
+#   make deps-status
+#
+# ⚠️ 本文件**未在真机上跑过**（写它的机器没有 docker）。排障顺序见 deploy/README.md。
+
+name: astra-observability
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# langfuse / langfuse-worker 共用同一份配置（v3 要求两个容器的环境变量一致）
+x-langfuse-env: &langfuse-env
+  # ── 业务库 ──
+  DATABASE_URL: postgresql://${OBS_PG_USER:-langfuse}:${OBS_PG_PASSWORD:-langfuse-dev-password}@postgres:5432/${OBS_PG_DB:-langfuse}
+  # ── trace 库（两个地址都要给，见文件头第 4 条）──
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+  CLICKHOUSE_USER: ${OBS_CLICKHOUSE_USER:-langfuse}
+  CLICKHOUSE_PASSWORD: ${OBS_CLICKHOUSE_PASSWORD:-langfuse-dev-password}
+  CLICKHOUSE_DB: ${OBS_CLICKHOUSE_DB:-langfuse}
+  # 单容器 clickhouse：必须 false，否则迁移会发 ON CLUSTER 语句而集群根本不存在
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  # ── 队列 / 缓存 ──
+  REDIS_CONNECTION_STRING: redis://valkey:6379
+  # ── S3（SeaweedFS）──
+  # events 存原始上报事件（每次 ingestion 都写），media 存图片/附件
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_BUCKET:-langfuse}
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_ACCESS_KEY:-langfuse-dev-key}
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_SECRET_KEY:-langfuse-dev-secret-change-me}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://seaweedfs:8333
+  # SeaweedFS / MinIO 这类自建对象存储都必须走 path style（bucket 在 path 里，不是子域名）
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: ${LANGFUSE_S3_BUCKET:-langfuse}
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_ACCESS_KEY:-langfuse-dev-key}
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_SECRET_KEY:-langfuse-dev-secret-change-me}
+  # 媒体端点必须是**浏览器能访问**的地址，所以指向宿主机映射端口，不是容器内网名
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${LANGFUSE_MEDIA_ENDPOINT:-http://127.0.0.1:8334}
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+  LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+  # ── 应用机密 ──
+  # SALT 用于哈希 API key；ENCRYPTION_KEY 必须是 64 位 hex（openssl rand -hex 32）。
+  # ⚠️ 下面三个默认值仅供本地开发，换掉它们不影响已有数据（SALT 换了已发的 key 会失效）
+  NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://127.0.0.1:3000}
+  NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-dev-only-nextauth-secret-change-before-prod}
+  SALT: ${LANGFUSE_SALT:-dev-only-salt-change-before-prod}
+  ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+  # 关掉上游遥测：默认会把实例版本信息发回 langfuse.com
+  TELEMETRY_ENABLED: "false"
+  # Node 堆上限：容器 limits 是 2Gi，Node 默认堆 1.7Gi 已经贴着上限，显式压到 1.5Gi 留余量
+  NODE_OPTIONS: --max-old-space-size=1536
+
+services:
+  # ── 业务库 ──────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: astra-obs-postgres
+    environment:
+      POSTGRES_USER: ${OBS_PG_USER:-langfuse}
+      POSTGRES_PASSWORD: ${OBS_PG_PASSWORD:-langfuse-dev-password}
+      POSTGRES_DB: ${OBS_PG_DB:-langfuse}
+      # 数据落子目录：直接挂到 /var/lib/postgresql/data 会被 lost+found 干扰 initdb
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      # 宿主机 5433：避开本地已经在跑的 5432（make serve 的 sqlite 不占端口，
+      # 但开发者机器上常见一个自己的 pg）
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready 比 TCP 探针准：端口开了但库还在恢复时，TCP 会通、它不会
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} -h 127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── trace 库 ────────────────────────────────────────────────
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: astra-obs-clickhouse
+    environment:
+      CLICKHOUSE_DB: ${OBS_CLICKHOUSE_DB:-langfuse}
+      CLICKHOUSE_USER: ${OBS_CLICKHOUSE_USER:-langfuse}
+      CLICKHOUSE_PASSWORD: ${OBS_CLICKHOUSE_PASSWORD:-langfuse-dev-password}
+      # 允许用上面的用户执行 CREATE/ALTER（langfuse 启动时要自己建表）
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+      # ⚠️ 必须 UTC。时区不是 UTC 时，langfuse 的时间范围查询会返回空结果——
+      #    这是最典型的「UI 里明明有数据但列表空」原因之一。
+      TZ: UTC
+    ports:
+      # 8123 = HTTP（CLICKHOUSE_URL），9000 只在容器网络内（迁移用）
+      - "127.0.0.1:8123:8123"
+    volumes:
+      - ./data/clickhouse:/var/lib/clickhouse
+      - ./data/clickhouse-logs:/var/log/clickhouse-server
+    # clickhouse 默认的 ulimit 太小会报 "Too many open files"，官方 compose 也是这么调的
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── 队列 / 缓存 ─────────────────────────────────────────────
+  valkey:
+    image: valkey/valkey:8.0
+    container_name: astra-obs-valkey
+    command:
+      - valkey-server
+      # ⚠️ noeviction 是硬要求：langfuse 的 ingestion 队列在 redis 里，
+      #    用 allkeys-lru 会在内存紧张时**静默丢任务**，表现为「trace 时有时无」。
+      - --maxmemory-policy
+      - noeviction
+      # 关 RDB 快照 / AOF：队列数据丢了可以重放，缓存丢了只是慢；
+      # 真正的持久化在 clickhouse 与 S3。少一层写盘，本地开发安静一点。
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    ports:
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - ./data/valkey:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── 对象存储（代替 MinIO）───────────────────────────────────
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.71
+    container_name: astra-obs-seaweedfs
+    command:
+      - server
+      - -dir=/data
+      - -s3
+      - -s3.port=8333
+      - -s3.config=/etc/seaweedfs/s3.json
+      - -master.volumeSizeLimitMB=1024
+    ports:
+      # 8334/9334：与 vector 那套（8333/9333）错开，两套能同时起
+      - "127.0.0.1:8334:8333"
+      - "127.0.0.1:9334:9333"
+    volumes:
+      - ./data/seaweedfs:/data
+      - ./seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9333/cluster/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+    logging: *default-logging
+
+  # 一次性容器：建 bucket。langfuse 每次 ingestion 都要往 bucket 写对象，
+  # bucket 不存在时表现为「上报返回 207 但 trace 永远不出现」——比报错还难查。
+  seaweedfs-init:
+    image: chrislusf/seaweedfs:3.71
+    container_name: astra-obs-seaweedfs-init
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          if echo "s3.bucket.create -name $${S3_BUCKET}" \
+               | weed shell -master=seaweedfs:9333 2>&1 | grep -qiE 'created|exists'; then
+            echo "bucket $${S3_BUCKET} 就绪"
+            exit 0
+          fi
+          echo "第 $$i 次建 bucket 未成功，2s 后重试"
+          sleep 2
+        done
+        echo "建 bucket 失败：请 docker compose -f deploy/observability/compose.yaml logs seaweedfs" >&2
+        exit 1
+    environment:
+      S3_BUCKET: ${LANGFUSE_S3_BUCKET:-langfuse}
+    restart: "no"
+    logging: *default-logging
+
+  # ── Langfuse web（UI + Public API）──────────────────────────
+  langfuse-web:
+    image: langfuse/langfuse:3.227.0
+    container_name: astra-obs-langfuse-web
+    environment:
+      <<: *langfuse-env
+      # ── 首启自动建 org / project / 一对 API key ──
+      # 只在数据库为空时生效；已初始化过就忽略。省掉「手点 UI 建项目再拷 key」那一步，
+      # 让 .env.example 里的 LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY 有确定的默认值可对。
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-astra}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-Astra}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-astra-default}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-astra}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-astra-dev}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-astra-dev}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@astra.local}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-admin}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-astra-dev-password}
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      seaweedfs-init:
+        condition: service_completed_successfully
+    healthcheck:
+      # /api/public/health 是 Langfuse 自带的公开健康端点（不需要鉴权）。
+      # 用 node 而不是 wget/curl：镜像里一定有 node，但不一定有 wget（基础镜像换过几次）。
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/public/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      # 首次启动要跑 prisma 迁移 + clickhouse 建表，慢的话 1-2 分钟
+      start_period: 120s
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ── Langfuse worker（消费队列 → 写 clickhouse）──────────────
+  # 少了它：UI 能登录、能建 key、上报返回 207，但 trace 永远查不到。
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3.227.0
+    container_name: astra-obs-langfuse-worker
+    environment:
+      <<: *langfuse-env
+      PORT: "3030"
+    # worker 不对外服务，不映射端口
+    depends_on:
+      langfuse-web:
+        # 等 web 把 prisma / clickhouse 迁移跑完，worker 起来就有表可写
+        condition: service_healthy
+    healthcheck:
+      # worker 自带一个 /api/health（3030 端口），它同时反映 redis 与 clickhouse 是否可用
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3030/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+    logging: *default-logging

@@ -1,0 +1,143 @@
+# SeaweedFS：Langfuse 的 S3（原始事件 + 媒体附件）
+#
+# 为什么是 SeaweedFS：MinIO 社区版 AGPLv3，项目红线（见 docs/design/platform-extension.md）。
+#
+# 一个关键区别：Langfuse 的 **media bucket 会被浏览器直连**（预签名 URL），
+# 所以 S3 端点必须对终端用户可达。这里只给 ClusterIP —— 意味着要让附件在浏览器里
+# 打得开，得再加一个 Ingress/Gateway 暴露 8333，或者把 LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT
+# 指向一个能转发到本 Service 的入口。**这一步没做**（集群里没有通用入口的既定方案，
+# 硬编一个域名只会让 apply 失败）。
+# ⇒ 现状：trace 上报链路完整可用；附件在 UI 里点开会 404。见 README「未做到」。
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-seaweedfs
+  namespace: astra-ops
+  labels: { app: langfuse-seaweedfs }
+spec:
+  selector: { app: langfuse-seaweedfs }
+  ports:
+    - { name: s3, port: 8333, targetPort: s3 }
+    - { name: master, port: 9333, targetPort: master }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: langfuse-seaweedfs-data
+  namespace: astra-ops
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-seaweedfs
+  namespace: astra-ops
+  labels: { app: langfuse-seaweedfs }
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: langfuse-seaweedfs }
+  template:
+    metadata:
+      labels: { app: langfuse-seaweedfs }
+    spec:
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: seaweedfs
+          image: chrislusf/seaweedfs:3.71
+          args:
+            - server
+            - -dir=/data
+            - -s3
+            - -s3.port=8333
+            - -s3.config=/etc/seaweedfs/s3.json
+            - -master.volumeSizeLimitMB=1024
+          ports:
+            - { name: s3, containerPort: 8333 }
+            - { name: master, containerPort: 9333 }
+          livenessProbe:
+            exec:
+              command: ["wget", "-q", "--spider", "http://127.0.0.1:9333/cluster/status"]
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            exec:
+              command: ["wget", "-q", "--spider", "http://127.0.0.1:9333/cluster/status"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits:   { memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: s3-config, mountPath: /etc/seaweedfs, readOnly: true }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: langfuse-seaweedfs-data
+        - name: s3-config
+          secret:
+            secretName: langfuse-s3
+            items:
+              - { key: s3.json, path: s3.json }
+---
+# 建 bucket 的 Job。Langfuse 每次 ingestion 都会往 bucket 写对象，
+# bucket 缺失时症状是「上报 207、trace 永不出现」，比直接报错难查得多。
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: langfuse-bucket-init
+  namespace: astra-ops
+  labels: { app: langfuse-bucket-init }
+spec:
+  backoffLimit: 10
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels: { app: langfuse-bucket-init }
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: create-bucket
+          image: chrislusf/seaweedfs:3.71
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+                if echo "s3.bucket.create -name ${S3_BUCKET}" \
+                     | weed shell -master=langfuse-seaweedfs.astra-ops.svc:9333 2>&1 \
+                     | grep -qiE 'created|exists'; then
+                  echo "bucket ${S3_BUCKET} 就绪"
+                  exit 0
+                fi
+                echo "第 $i 次未成功，4s 后重试"
+                sleep 4
+              done
+              exit 1
+          env:
+            - { name: S3_BUCKET, value: langfuse }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }

@@ -140,6 +140,105 @@ note = """
 """
 
 # ─────────────────────────────────────────────────────────────
+# 观测后端（Langfuse 核心）
+# ─────────────────────────────────────────────────────────────
+[[source]]
+name        = "langfuse"
+mode        = "submodule"
+repo        = "https://github.com/langfuse/langfuse.git"
+ref         = "v3.227.0"
+commit      = "77fa0420870768cbeb5fbf080b9571b80332eb0d"
+license     = "MIT Expat（核心）/ 商业许可（ee/ 子树）"
+dest        = "third_party/langfuse"
+size_hint   = "未实测（含 web/ 与 worker/ 两个 Next.js 应用，量级在百 MB）"
+purpose     = """
+**只作为「源码可审计」的镜像，运行用容器镜像**，不从源码构建。
+部署侧引用的镜像是 langfuse/langfuse:3.227.0 与 langfuse/langfuse-worker:3.227.0，
+其 tag 指向的就是本条目锁定的 commit —— 镜像与源码一一对应，审计时不必「相信我们的拷贝」。
+
+需要读源码的三件事：
+  · 写入协议——POST /api/public/ingestion 的 batch 结构、207 里每条的 status 语义
+    （internal/obs 自己拼 HTTP 请求，不引 SDK，协议细节只能从源码确认）
+  · 鉴权——public/secret key 的校验方式、Basic Auth 的编码形式
+  · 异步链路——web 只写 S3 + redis 队列，worker 才落 clickhouse；
+    这决定了「为什么起了 web 却查不到 trace」这类问题的排查方向
+"""
+license_note = """
+⚠️ 不能笼统说「Langfuse 是 MIT」。根 LICENSE 原文：
+
+  All content that resides under the "ee/", "web/src/ee/", and/or "worker/src/ee/"
+  directories ... is licensed under the license defined in "ee/LICENSE".
+  Content outside of the above mentioned directories ... is available under the
+  "MIT Expat" license.
+
+ee/LICENSE 自身是 Enterprise License（open core 模型：核心 MIT，外围商业）。
+对本仓库的含义：
+  · 我们只用 MIT 核心（trace 摄取、查询、UI），不启用任何 ee 功能 → 不触发商业条款
+  · submodule 只是「源码镜像」，不分发、不链接、不修改，随仓库原样保留上游 LICENSE
+  · 若将来要用 ee 功能（RBAC、SCIM、审计日志导出等），那是一次**许可决策**，
+    需要单独评估并更新 NOTICE，不是「改个环境变量」的事
+MIT 要求保留版权声明，上游 LICENSE 随 submodule 就在，满足。
+"""
+note = """
+与 deepseek-harness 同规矩：submodule 提供「能点进上游原仓库、能 diff」的路径，
+**运行时不用这份源码构建**——镜像是官方发布物，版本以 tag 为准。
+
+⚠️ v3 已被上游标为 deprecated（v4 已 GA）。之所以仍钉 v3：
+  · go 侧的写入只依赖 Ingestion HTTP API，v3/v4 的 batch 结构不同，
+    切 v4 要重做 internal/obs（v4 换成了 OTel 风格）
+  · v3 的存储要求（ClickHouse ≥ 24.3 / PG ≥ 12 / Redis ≥ 7）与 compose 里选的版本匹配
+  升级 Langfuse = 同时评估 obs 模块与 clickhouse 版本，别单独 bump 这里。
+
+⚠️ 本条目加入时**没有 fetch 过**（没网/体积太大）。因此：
+  · `make sync-verify` 现在会把它报成「缺失（未 fetch）」——这是如实反映，不是 bug
+  · 要落地源码：`bash scripts/sync-upstream.sh fetch langfuse`
+  · fetch 之后需在 .gitmodules 里登记 path/url（脚本会自动 git submodule add）
+"""
+paths = [
+  "web/",
+  "worker/",
+  "packages/",
+  "ee/",
+]
+
+# ─────────────────────────────────────────────────────────────
+# 向量库后端（Milvus）
+# ─────────────────────────────────────────────────────────────
+[[source]]
+name        = "milvus"
+mode        = "submodule"
+repo        = "https://github.com/milvus-io/milvus.git"
+ref         = "v2.4.15"
+commit      = "b7c80f9b83e98455162af208558bfb48a23228bc"
+license     = "Apache-2.0"
+dest        = "third_party/milvus"
+size_hint   = "未实测（上游主仓量级数百 MB；sparse 后只留 proto 子树）"
+purpose     = """
+**只作为「源码可审计」的镜像，运行用容器镜像** milvusdb/milvus:v2.4.15
+（tag 对应本条目 commit）。
+
+要读源码的只有一件事：**gRPC 契约**。internal/memory 走 milvus-sdk-go/v2，
+SDK 的请求/响应结构直接来自 internal/proto/。出现「SDK 报错但服务端日志干净」
+这类问题时，唯一的判据就是对照服务端的 proto 定义与参数校验逻辑。
+"""
+note = """
+为什么钉 2.4.15 而不是上游最新（写这份条目时最新 release 是 3.0.x）：
+  · 部署产物（deploy/vector/compose.yaml、deploy/k8s/vector/milvus.yaml）用的就是
+    milvusdb/milvus:v2.4.15 —— 源码条目与运行镜像必须同版本，否则「可审计」是假的
+  · 2.6/3.0 动了协议与部署形态（3.x 拆分得更彻底），升版本是独立任务，
+    要先确认 milvus-sdk-go/v2 的兼容区间与 partition key / HNSW 参数的行为
+  · 本仓库不使用 Milvus 的 Lite/Embedded 变体
+
+⚠️ 与 langfuse 条目同样：加入时**未 fetch**，`make sync-verify` 会报「缺失」。
+落地源码：`bash scripts/sync-upstream.sh fetch milvus`。
+sparse 只留 internal/proto/：整仓里 pkg/、cmd/、tests/ 对我们没有审计价值，
+而 proto 是唯一需要逐字核对的东西。
+"""
+paths = [
+  "internal/proto/",
+]
+
+# ─────────────────────────────────────────────────────────────
 # 尚未引入（记录决策，避免后来人重复调研）
 # ─────────────────────────────────────────────────────────────
 # apache/apisix            Apache-2.0  —— 走 helm chart 部署，不是代码依赖，不入 third_party

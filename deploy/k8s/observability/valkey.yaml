@@ -1,0 +1,91 @@
+# Valkey 8：Langfuse 的队列 + 缓存
+#
+# 为什么不是 redis：redis 7.4 起改成 RSALv2/SSPLv1 双许可，不再是 BSD。
+# valkey 是 Linux 基金会下的 BSD-3-Clause fork，协议兼容（RESP），
+# 用法上与 redis 无差别（langfuse 官方 v4 文档也把 Valkey 8 列为支持）。
+#
+# 为什么不设密码：集群内网 + NetworkPolicy 才是正确的隔离手段，而本地试点加个
+# 明文密码只会让人以为安全了。生产要么开 requirepass（走 Secret），要么靠网络策略。
+#
+# ⚠️ maxmemory-policy 必须是 noeviction：队列里的任务被 LRU 淘汰 = 静默丢 trace。
+#    表现为「上报返回 207，但有些 trace 永远查不到」。
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey
+  namespace: astra-ops
+  labels: { app: valkey }
+spec:
+  selector: { app: valkey }
+  ports:
+    - { name: redis, port: 6379, targetPort: redis }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: valkey-data
+  namespace: astra-ops
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valkey
+  namespace: astra-ops
+  labels: { app: valkey }
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: valkey }
+  template:
+    metadata:
+      labels: { app: valkey }
+    spec:
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: valkey
+          image: valkey/valkey:8.0
+          args:
+            - valkey-server
+            - --maxmemory-policy
+            - noeviction
+            # 不落 RDB：队列丢了可以重放，真正的持久化在 clickhouse 与 S3。
+            # 少一层 fsync，本地开发的 io 噪音也小。
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+          ports:
+            - { name: redis, containerPort: 6379 }
+          livenessProbe:
+            exec: { command: ["valkey-cli", "ping"] }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            exec: { command: ["valkey-cli", "ping"] }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: valkey-data

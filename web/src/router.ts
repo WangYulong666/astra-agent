@@ -13,6 +13,10 @@ export const ROUTES = [
   '/admin/audit',
   '/admin/sandboxes',
   '/admin/lifecycle',
+  // 平台扩展的三个面板：可观测 / 记忆 / 能力包
+  '/admin/observability',
+  '/admin/memory',
+  '/admin/skills',
   '/admin/tenants',
   '/admin/settings',
 ] as const

@@ -13,6 +13,9 @@ import { Sandboxes } from './Sandboxes'
 import { Lifecycle } from './Lifecycle'
 import { Tenants } from './Tenants'
 import { Settings } from './Settings'
+import { Observability } from './Observability'
+import { Memory } from './Memory'
+import { Skills } from './Skills'
 
 type Tab = { path: string; label: string; ownerOnly?: boolean }
 
@@ -23,6 +26,12 @@ const TABS: Tab[] = [
   { path: '/admin/audit', label: '审计' },
   { path: '/admin/sandboxes', label: '沙箱' },
   { path: '/admin/lifecycle', label: '回收' },
+  // 平台扩展的三个面板排在「运行时治理」之后、「租户/设置」之前：
+  // 它们看的是能力开没开，与上面的沙箱/回收同属运行时，而租户与设置是全局配置，
+  // 放最后天然是「收尾」的位置。
+  { path: '/admin/observability', label: '可观测' },
+  { path: '/admin/memory', label: '记忆' },
+  { path: '/admin/skills', label: '能力包' },
   // 租户管理只有 owner 有权限（admin 的权限表里没有 tenant:manage），
   // 给 admin 显示一个必然 403 的入口没有意义。
   { path: '/admin/tenants', label: '租户', ownerOnly: true },
@@ -46,6 +55,12 @@ export function AdminLayout({ path }: { path: string }) {
         return <Sandboxes />
       case '/admin/lifecycle':
         return <Lifecycle />
+      case '/admin/observability':
+        return <Observability />
+      case '/admin/memory':
+        return <Memory />
+      case '/admin/skills':
+        return <Skills />
       case '/admin/tenants':
         return isOwner ? <Tenants /> : <Denied />
       case '/admin/settings':

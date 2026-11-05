@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: astra-ops
+
+# 观测栈（Langfuse v3 全家桶）。与 vector/ 一样，刻意不并进 base：
+# 它是**可选能力**，缺了它平台照常可用（只是看不到 trace）。
+#
+# apply 顺序不保证正确性，靠探针：
+#   postgres / clickhouse / valkey / seaweedfs 各自 readiness 绿了之后，
+#   langfuse-web 才能连上（它的探针会在依赖未就绪时一直红）。
+# web 起来之后再起 worker（worker 依赖 web 跑完 clickhouse 迁移；
+# 这里没有 initContainer 依赖，只能靠失败重试 —— 见 README 的排障顺序）。
+resources:
+  - namespace.yaml
+  - postgres.yaml
+  - clickhouse.yaml
+  - valkey.yaml
+  - seaweedfs.yaml
+  - langfuse.yaml
+
+# secret.example.yaml 刻意不在 resources 里（假值不进集群）。
+# 没有 images/newTag：三个外部镜像在各自文件里写死显式 tag，避免两个版本事实来源。

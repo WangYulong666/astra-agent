@@ -1,0 +1,91 @@
+# etcd：Milvus 的元数据存储（collection schema、segment 状态、索引信息）
+#
+# 为什么不用 Milvus 自带的内嵌 etcd：2.4 的 standalone 也要求外部 etcd，
+# 内嵌模式在 2.4 已经被移除。
+#
+# 为什么单副本：这是**开发/自测**形态。etcd 没有 quorum 就没有高可用，
+# 3 节点才谈得上；生产请用托管的 etcd 或至少 3 副本 + 反亲和。
+# 单副本直接挂 PVC 是刻意的：etcd 的数据丢了 = 所有 collection 都要重建，
+# 而 PVC 至少保证 `kubectl delete pod` 不会丢。
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd
+  namespace: astra-data
+  labels: { app: etcd }
+spec:
+  # headless：StatefulSet 需要稳定 DNS（etcd.astra-data.svc）
+  clusterIP: None
+  selector: { app: etcd }
+  ports:
+    - { name: client, port: 2379, targetPort: client }
+    - { name: peer, port: 2380, targetPort: peer }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: etcd
+  namespace: astra-data
+  labels: { app: etcd }
+spec:
+  serviceName: etcd
+  replicas: 1
+  selector:
+    matchLabels: { app: etcd }
+  template:
+    metadata:
+      labels: { app: etcd }
+    spec:
+      # 单副本 + RWO 盘：滚动更新必须先把旧 pod 停掉再起新的，否则两个进程抢同一块盘
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: etcd
+          image: quay.io/coreos/etcd:v3.5.16
+          command:
+            - etcd
+            - --name=astra-etcd
+            - --data-dir=/etcd-data
+            # 写成 pod 的稳定 DNS，而不是 0.0.0.0：advertise 出去的是「别人该用什么地址找你」
+            - --advertise-client-urls=http://etcd-0.etcd.astra-data.svc:2379
+            - --listen-client-urls=http://0.0.0.0:2379
+            - --listen-peer-urls=http://0.0.0.0:2380
+            - --initial-advertise-peer-urls=http://etcd-0.etcd.astra-data.svc:2380
+            - --initial-cluster=astra-etcd=http://etcd-0.etcd.astra-data.svc:2380
+            - --initial-cluster-state=new
+            - --quota-backend-bytes=4294967296
+            - --log-level=warn
+          ports:
+            - { name: client, containerPort: 2379 }
+            - { name: peer, containerPort: 2380 }
+          # endpoint health 会真发一次 KV 读请求，比 TCP 探针准
+          livenessProbe:
+            exec: { command: ["etcdctl", "endpoint", "health"] }
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            exec: { command: ["etcdctl", "endpoint", "health"] }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: data, mountPath: /etcd-data }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 5Gi

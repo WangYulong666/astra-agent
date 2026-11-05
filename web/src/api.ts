@@ -495,3 +495,74 @@ function subscribeWithFetch(
     h.onState('closed')
   }
 }
+
+// ── 平台扩展：可观测 / 向量记忆 ───────────────────────────────
+//
+// 这两块的共同点是「能力可能关着」：没配 Langfuse / Milvus 时接口照常存在，
+// 只是回 enabled=false（或 503 + 一句可操作的原因）。前端不做能力探测的
+// 第二套逻辑，一律以接口回的东西为准——否则前后端会各说一套。
+
+/** GET /v1/admin/obs/config。secret key 留在服务端，这里只有 public key。 */
+export type ObsConfig = {
+  enabled: boolean
+  endpoint: string
+  dashboard_url: string
+  public_key: string
+}
+
+/** Langfuse trace 摘要（服务端代查，字段见 internal/trace.Summary）。 */
+export type ObsTrace = {
+  id: string
+  name?: string
+  run_id?: string
+  status?: string
+  latency_ms?: number
+  started_at?: string
+  url?: string
+  /** 输入摘要：服务端已截断，前端不再二次处理 */
+  input?: string
+}
+
+export const obsApi = {
+  config: () => request<ObsConfig>('/v1/admin/obs/config'),
+
+  traces: (runId = '', limit = 20) => {
+    const q = new URLSearchParams({ limit: String(limit) })
+    if (runId) q.set('run_id', runId)
+    return request<{ items: ObsTrace[]; limit: number }>(`/v1/admin/obs/traces?${q.toString()}`)
+  },
+}
+
+/** GET /v1/memory/stats。未配置 Milvus 时 enabled=false、backend=disabled。 */
+export type MemoryStats = {
+  enabled: boolean
+  backend: string
+  collection: string
+  count: number
+  dim: number
+  embedder: string
+}
+
+/**
+ * 一条记忆。score 只有检索结果才有（写入响应里是 0，被 omitempty 吞掉），
+ * 所以这里必须是可选——展示层用「—」兜底，不要显示 0.000 骗人。
+ */
+export type MemoryItem = {
+  id: string
+  text: string
+  score?: number
+  kind: string
+  created_at: string
+  session_id?: string
+}
+
+export const memoryApi = {
+  stats: () => request<MemoryStats>('/v1/memory/stats'),
+
+  // 服务端强制按调用者的 tenant_id + user_id 过滤，前端没有、也不该有
+  // 「按 user 查」的参数——传了也不会生效。
+  search: (q: string, k = 10) =>
+    request<{ items: MemoryItem[]; query: string; k: number }>(
+      `/v1/memory/search?q=${encodeURIComponent(q)}&k=${k}`,
+    ),
+}

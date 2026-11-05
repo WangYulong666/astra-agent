@@ -19,8 +19,13 @@ const DefaultBuffer = 512
 type Hub struct {
 	mu   sync.RWMutex
 	subs map[string]map[*Sub]struct{}
-	// globalFn 是进程内全局消费者（桌面通知、审计旁路）。nil 表示没有。
-	globalFn func(store.Event)
+	// globalFns 是进程内全局消费者（桌面通知、审计旁路、观测、记忆入库）。
+	//
+	// 早期这里只放了一个函数，后注册的会覆盖先注册的——加了第二个消费者
+	// （trace 与 memory 都要订阅 run 终态）之后，谁后装配谁就把别人顶掉，
+	// 症状是「观测和记忆只能活一个」，而且没有任何报错。
+	// 现在改成列表：追加语义，Publish 时按注册顺序逐个调。
+	globalFns []func(store.Event)
 }
 
 func New() *Hub { return &Hub{subs: map[string]map[*Sub]struct{}{}} }
@@ -39,12 +44,16 @@ func (h *Hub) Subscribe(runID string) *Sub {
 	return s
 }
 
-// OnGlobal 注册全局事件回调。回调在 Publish 调用方的 goroutine 里同步执行，
-// 必须快、不许阻塞、不许 panic——它挡着所有 SSE 推送的路。
-// 只有一个消费者有意义，后注册的覆盖先注册的。
+// OnGlobal 注册全局事件回调（可注册多个，追加语义）。
+//
+// 回调在 Publish 调用方的 goroutine 里同步执行，必须快、不许阻塞、不许 panic——
+// 它挡着所有 SSE 推送的路。重活要自己丢进队列（trace/memory 都是这么做的）。
 func (h *Hub) OnGlobal(fn func(store.Event)) {
+	if fn == nil {
+		return
+	}
 	h.mu.Lock()
-	h.globalFn = fn
+	h.globalFns = append(h.globalFns, fn)
 	h.mu.Unlock()
 }
 
@@ -52,14 +61,19 @@ func (h *Hub) OnGlobal(fn func(store.Event)) {
 // 由客户端凭 Last-Event-ID / after_seq 重连补齐——丢的是通知，不是数据。
 func (h *Hub) Publish(ev store.Event) {
 	h.mu.RLock()
-	fn := h.globalFn
+	fns := make([]func(store.Event), len(h.globalFns))
+	copy(fns, h.globalFns)
 	for s := range h.subs[ev.RunID] {
 		s.push(ev)
 	}
 	h.mu.RUnlock()
-	if fn != nil {
-		// 在锁外回调：消费者如果再碰 Hub（例如订阅）不能死锁。
-		fn(ev)
+	// 在锁外回调：消费者如果再碰 Hub（例如订阅）不能死锁。
+	// panic 单独隔离：一个消费者崩了不能连累 SSE 扇出和其他消费者。
+	for _, fn := range fns {
+		func() {
+			defer func() { _ = recover() }()
+			fn(ev)
+		}()
 	}
 }
 

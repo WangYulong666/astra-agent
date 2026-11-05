@@ -1,0 +1,58 @@
+# 建 bucket 的一次性 Job
+#
+# 为什么单独一个 Job 而不是让 Milvus 自己建：milvus 2.4 在 bucket 缺失时的自动创建
+# 依赖 S3 的 CreateBucket 语义，SeaweedFS 上失败时它只在日志里刷 "no such bucket"，
+# 而 /healthz 仍然是 200 —— 排查成本极高。
+#
+# 为什么不放 initContainer：milvus 是 StatefulSet，initContainer 会在每次重启时重跑，
+# 而建 bucket 是幂等的但要多等一轮；Job 失败还能停在 Failed 上被人看见。
+#
+# ⚠️ Job 不是工作负载（check-deploy.sh 的探针/资源断言不管它），但仍然给了 resources.limits。
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vector-bucket-init
+  namespace: astra-data
+  labels: { app: vector-bucket-init }
+spec:
+  # 失败重试几次：seaweedfs 刚起来时 master 可能还没选出 leader
+  backoffLimit: 10
+  # 成功 24h 后自动清理，避免 apply 之后一堆 Completed 的 Job 堆着
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels: { app: vector-bucket-init }
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: create-bucket
+          image: chrislusf/seaweedfs:3.71
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+                if echo "s3.bucket.create -name ${S3_BUCKET}" \
+                     | weed shell -master=seaweedfs.astra-data.svc:9333 2>&1 \
+                     | grep -qiE 'created|exists'; then
+                  echo "bucket ${S3_BUCKET} 就绪"
+                  exit 0
+                fi
+                echo "第 $i 次未成功，4s 后重试"
+                sleep 4
+              done
+              echo "建 bucket 失败：kubectl -n astra-data logs job/vector-bucket-init" >&2
+              exit 1
+          env:
+            # 必须与 milvus 的 MINIO_BUCKET_NAME 一致
+            - { name: S3_BUCKET, value: milvus }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }

@@ -1,0 +1,97 @@
+# SeaweedFS：Milvus 的对象存储（段文件、索引文件、binlog）
+#
+# 为什么是 SeaweedFS 而不是 MinIO：MinIO 社区版 AGPLv3，项目红线。
+# SeaweedFS 是 Apache-2.0，S3 兼容（Milvus 通过 MINIO_* 环境变量配的其实就是「S3 端点」）。
+#
+# 形态：`weed server -s3` 一个进程同时跑 master + volume + filer + S3 网关。
+# 单副本、单盘。生产应该拆成 master(3) + volume(N) + filer + s3，各自独立伸缩——
+# 那是另一套编排，这里不假装已经做了。
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: seaweedfs
+  namespace: astra-data
+  labels: { app: seaweedfs }
+spec:
+  selector: { app: seaweedfs }
+  ports:
+    - { name: s3, port: 8333, targetPort: s3 }
+    - { name: master, port: 9333, targetPort: master }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: seaweedfs-data
+  namespace: astra-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: seaweedfs
+  namespace: astra-data
+  labels: { app: seaweedfs }
+spec:
+  replicas: 1
+  # RWO 盘 + 单副本：绝不能让新旧两个 pod 同时挂同一块盘
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: seaweedfs }
+  template:
+    metadata:
+      labels: { app: seaweedfs }
+    spec:
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: seaweedfs
+          image: chrislusf/seaweedfs:3.71
+          args:
+            - server
+            - -dir=/data
+            - -s3
+            - -s3.port=8333
+            - -s3.config=/etc/seaweedfs/s3.json
+            - -master.volumeSizeLimitMB=1024
+          ports:
+            - { name: s3, containerPort: 8333 }
+            - { name: master, containerPort: 9333 }
+          # /cluster/status 是 master 的只读端点，不经过 S3 鉴权，适合当探针
+          livenessProbe:
+            exec:
+              command: ["wget", "-q", "--spider", "http://127.0.0.1:9333/cluster/status"]
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            exec:
+              command: ["wget", "-q", "--spider", "http://127.0.0.1:9333/cluster/status"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits:   { memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: s3-config, mountPath: /etc/seaweedfs, readOnly: true }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: seaweedfs-data
+        - name: s3-config
+          secret:
+            secretName: vector-s3
+            items:
+              - { key: s3.json, path: s3.json }

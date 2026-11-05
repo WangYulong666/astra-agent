@@ -1,0 +1,28 @@
+{
+  "_comment": [
+    "SeaweedFS 的 S3 访问凭据（-s3.config）。这份文件专供 Langfuse 那套用，",
+    "与 deploy/vector/seaweedfs/s3.json 是**两套独立实例**，key 故意不同。",
+    "!! 开发默认值，与 compose.yaml 里 LANGFUSE_S3_ACCESS_KEY / LANGFUSE_S3_SECRET_KEY 的默认值一致。",
+    "!! 生产：改用 Secret 挂载（k8s 见 deploy/k8s/observability/secret.example.yaml），不要提交真 key。",
+    "identities 非空 = 拒绝匿名请求。空 identities 时 SeaweedFS 默认匿名可读写，",
+    "而 langfuse 的 media bucket 会被浏览器直连（预签名 URL），端口一旦暴露就是公开可写。"
+  ],
+  "identities": [
+    {
+      "name": "astra-langfuse",
+      "credentials": [
+        {
+          "accessKey": "langfuse-dev-key",
+          "secretKey": "langfuse-dev-secret-change-me"
+        }
+      ],
+      "actions": [
+        "Admin",
+        "Read",
+        "Write",
+        "List",
+        "Tagging"
+      ]
+    }
+  ]
+}

@@ -98,3 +98,9 @@ tmp/
 .tmp/
 *.log
 !deploy/**/*.log
+
+# 依赖组件（Milvus / Langfuse）的数据目录。
+# docker compose 用 ./data/<service> 绑定挂载，里面是 etcd 的 db 文件、
+# clickhouse 的 part、pg 的 WAL 与登录账号哈希——体积大且绝不能进 git。
+deploy/vector/data/
+deploy/observability/data/

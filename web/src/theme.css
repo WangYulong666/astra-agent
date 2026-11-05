@@ -1876,3 +1876,42 @@ kbd {
 .preview-binary svg {
   color: var(--t-text-faint);
 }
+
+/* ═══ 运营后台：可观测 / 记忆 / 能力包 ═══════════════════════════
+   只给颜色与字体归属；尺寸、间距、溢出在 styles.css 的对应小节。
+   新面板沿用旧类名（.card/.tbl/.notice/.settings-kv），这里只补
+   三个此前没有的语义块：#记忆命中项、能力包命令、可点击行的高亮。 */
+
+/* 可点击行：hover 用强调色的极淡底，给出「这一行会打开东西」的反馈。
+   比默认的白色微亮更容易被认出来，又不至于像被选中。 */
+.tbl tbody tr.link:hover {
+  background: var(--t-accent-softer);
+}
+.tbl tbody tr.link:hover .cell-cut {
+  color: var(--text);
+}
+
+/* 相似度分数是这行的主键，用正文色；正文用次级色 */
+.mem-score {
+  color: var(--text);
+  font-family: var(--mono);
+}
+.mem-hit-text {
+  color: var(--text-2);
+}
+
+/* 能力包名是命令的一部分，等宽；描述是给人读的 */
+.skill-name {
+  font-family: var(--mono);
+  color: var(--text);
+}
+.skill-desc {
+  color: var(--text-2);
+}
+
+/* 安装命令给「可复制」的凹槽底：与工具输出同一种质感 */
+.cmd-line code {
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--t-sunken);
+}

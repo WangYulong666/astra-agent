@@ -1,0 +1,12 @@
+# 依赖组件命名空间（观测侧）
+#
+# 与 base/namespace.yaml 里的 astra-ops 保持一致（单独 apply 本目录时的自足副本）。
+# 观测栈跑的是第三方有状态组件（clickhouse/pg/valkey/S3），和业务 pod 分开更安全：
+# 一个调试用 `kubectl delete ns` 不会顺手带走 astra-system。
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: astra-ops
+  labels:
+    name: astra-ops

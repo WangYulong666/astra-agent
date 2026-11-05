@@ -1,0 +1,99 @@
+# ClickHouse：Langfuse 的 trace 存储（traces / observations / scores 宽表）
+#
+# 版本要求（硬约束，不是建议）：Langfuse **v3 要 ClickHouse ≥ 24.3**。
+# 这里用 24.8（v3 官方 compose 用的也是 24.x）。升 Langfuse 到 v4 的话门槛是 25.12 起，
+# 见 deploy/README.md 的版本兼容表。
+#
+# ⚠️ 必须 UTC：容器时区不是 UTC 时，Langfuse 的时间范围查询会返回空结果
+#    ——「UI 里明明有数据但列表是空的」最常见的两个原因之一（另一个是 worker 没起）。
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: astra-ops
+  labels: { app: clickhouse }
+spec:
+  selector: { app: clickhouse }
+  ports:
+    - { name: http, port: 8123, targetPort: http }
+    # native 端口：Langfuse 的 CLICKHOUSE_MIGRATION_URL 走这个（clickhouse://host:9000）
+    - { name: native, port: 9000, targetPort: native }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse
+  namespace: astra-ops
+  labels: { app: clickhouse }
+spec:
+  serviceName: clickhouse
+  replicas: 1
+  selector:
+    matchLabels: { app: clickhouse }
+  template:
+    metadata:
+      labels: { app: clickhouse }
+    spec:
+      securityContext:
+        # clickhouse 官方镜像以非 root 用户运行自己，但启动时要写 /var/lib 与 /var/log
+        fsGroup: 101
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:24.8
+          ports:
+            - { name: http, containerPort: 8123 }
+            - { name: native, containerPort: 9000 }
+          env:
+            - { name: CLICKHOUSE_DB, value: langfuse }
+            - { name: CLICKHOUSE_USER, value: langfuse }
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom: { secretKeyRef: { name: langfuse-db, key: clickhouse-password } }
+            # 允许应用用户自己 CREATE/ALTER 表（Langfuse 启动时会跑建表迁移）
+            - { name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT, value: "1" }
+            - { name: TZ, value: UTC }
+          # 探针用镜像自带的 wget 打 /ping（返回 "Ok."），不用 httpGet：
+          # 这里 httpGet 的路径约定（/healthz）在 clickhouse 上不存在，硬凑反而误导
+          livenessProbe:
+            exec:
+              command: ["wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8123/ping"]
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            exec:
+              command: ["wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8123/ping"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            # Langfuse 官方给 clickhouse 的最小建议是 2C/8Gi。先按一半给，
+            # 单机试点够用；真上量先加内存（合并与查询都吃内存）。
+            requests: { cpu: 500m, memory: 2Gi }
+            limits:   { memory: 8Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/clickhouse }
+            - { name: logs, mountPath: /var/log/clickhouse-server }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 50Gi
+    # 日志单独一块盘：clickhouse 的日志能把 data 盘写满，写满之后它自己就起不来了
+    - metadata:
+        name: logs
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 5Gi

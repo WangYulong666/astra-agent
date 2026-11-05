@@ -1,0 +1,12 @@
+# 依赖组件命名空间
+#
+# 复用 base/namespace.yaml 里已经声明过的 astra-data（那一份是「分层」的总表，
+# 这里是单独 apply 本目录时的最小自足副本）。两者内容刻意保持完全一致：
+# 同名对象重复 apply 是幂等的；不一致才会在 `kubectl apply -k` 时把标签改来改去。
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: astra-data
+  labels:
+    name: astra-data

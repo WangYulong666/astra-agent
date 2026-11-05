@@ -1,0 +1,100 @@
+# Milvus standalone（2.4.15）
+#
+# 依赖：etcd（元数据）+ seaweedfs（对象存储），两者都要先就绪。
+# 就绪顺序不靠 apply 先后，靠探针：/healthz 只有 etcd 与 S3 都通才 200，
+# 所以 milvus 的 readiness 用 grpc 端口 + liveness 用 /healthz 组合即可。
+#
+# 为什么用 StatefulSet 而不是 Deployment：
+#   · /var/lib/milvus 里是 WAL（rocksmq），进程必须认同一份；RWO 盘 + 稳定标识更省心
+#   · 扩副本需要引入 etcd 里的 shard 分配，不是改 replicas 就行 —— 所以这里写死 1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: milvus
+  namespace: astra-data
+  labels: { app: milvus }
+spec:
+  selector: { app: milvus }
+  ports:
+    # MILVUS_ADDR 指向 milvus.astra-data.svc:19530
+    - { name: grpc, port: 19530, targetPort: grpc }
+    - { name: metrics, port: 9091, targetPort: metrics }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: milvus
+  namespace: astra-data
+  labels: { app: milvus }
+spec:
+  serviceName: milvus
+  replicas: 1
+  selector:
+    matchLabels: { app: milvus }
+  template:
+    metadata:
+      labels: { app: milvus }
+      annotations:
+        # milvus 自带 prometheus 格式指标（端口 9091），这里是第三方组件，
+        # 但也值得抓——否则「检索变慢」时只能猜。
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+        prometheus.io/path: "/metrics"
+    spec:
+      # milvus 用了 io_uring / 大页相关的系统调用，RuntimeDefault 的 seccomp 在部分
+      # 内核上会让它卡在 "wait for etcd"。官方 compose 同样给了 seccomp:unconfined。
+      # 代价：这个 pod 的 syscall 面比业务 pod 大 —— 所以它单独一个 ns，别和 api 混。
+      securityContext:
+        seccompProfile: { type: Unconfined }
+      containers:
+        - name: milvus
+          image: milvusdb/milvus:v2.4.15
+          command: ["milvus", "run", "standalone"]
+          ports:
+            - { name: grpc, containerPort: 19530 }
+            - { name: metrics, containerPort: 9091 }
+          env:
+            # 集群内地址，用完整 DNS，避免依赖 search domain 的拼接顺序
+            - { name: ETCD_ENDPOINTS, value: "etcd.astra-data.svc:2379" }
+            # 变量名是 MINIO_*（历史包袱），值其实是 SeaweedFS 的 S3 端点
+            - { name: MINIO_ADDRESS, value: "seaweedfs.astra-data.svc:8333" }
+            - { name: MINIO_BUCKET_NAME, value: "milvus" }
+            - { name: MINIO_USE_SSL, value: "false" }
+            - name: MINIO_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: vector-s3, key: access-key } }
+            - name: MINIO_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: vector-s3, key: secret-key } }
+            - { name: TZ, value: UTC }
+          # liveness 用 healthz：它同时覆盖 etcd 与 S3。路径必须是 /healthz（check-deploy 约定）
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            # 首次启动要建 WAL、拉 segment 清单，90s 是实测经验值（compose 里也是这个数）
+            initialDelaySeconds: 90
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 5
+          # readiness 只看 grpc 端口通了没：比 healthz 更快反映「能不能收请求」
+          readinessProbe:
+            tcpSocket: { port: grpc }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 500m, memory: 2Gi }
+            limits:   { memory: 8Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/milvus }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 20Gi
