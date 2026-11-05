@@ -550,13 +550,21 @@ func TestUserCRUDAndCount(t *testing.T) {
 
 	login := time.Now().UTC()
 	got.LastLoginAt = login
+	// 精度：SQLite 的落库格式是固定 9 位纳秒（见 sqliteTimeLayout），无损。
+	// 原来断言拿 login.Truncate(time.Microsecond) 比，等于假设存储只到微秒——
+	// 在能完整保留纳秒的环境下必然不等（CI 上就是这么红的）。
+	// 这里改成容差 ≤1 微秒：既能抓住「根本没写进去」（差值是分钟级），
+	// 又不依赖具体方言的精度。
 	got.Role = store.RoleAdmin
 	if err := s.UpdateUser(ctx, got); err != nil {
 		t.Fatalf("UpdateUser: %v", err)
 	}
 	after, _ := s.GetUser(ctx, "u1")
-	if after.Role != store.RoleAdmin || !after.LastLoginAt.Equal(login.Truncate(time.Microsecond)) {
-		t.Errorf("UpdateUser 未生效: %+v", after)
+	if after.Role != store.RoleAdmin {
+		t.Errorf("UpdateUser 未生效（role）: %+v", after)
+	}
+	if diff := after.LastLoginAt.Sub(login); diff > time.Microsecond || diff < -time.Microsecond {
+		t.Errorf("UpdateUser 未生效（last_login_at 偏差 %v）: %+v", diff, after)
 	}
 
 	n, err := s.CountUsers(ctx, "t1")

@@ -432,19 +432,48 @@ func (f *File) Close() error {
 
 // writeJSON 原子写：先写临时文件再 rename。
 // 直接 truncate 原文件的话，写到一半崩溃会留下半截 JSON，等于数据全丢。
+//
+// 临时名必须**唯一**。以前固定用 path+".tmp"：两个 goroutine 并发更新同一实体
+// （典型场景：run 的状态与 stopReason 由不同路径同时写）会踩在同一个 tmp 上——
+// A 刚 WriteFile 截断、B 正在写，最后 rename 出来的是两份内容交错的半成品，
+// 读侧报 `invalid character 'x' after top-level value`，整个 run 就读不出来了。
+// CI 上 TestCancelReleasesPendingApproval 偶发红就是这个（2 核机器调度更紧凑，
+// 本地 10 核很少撞上）。CreateTemp 让每个 writer 独占一个 tmp，rename 本身原子，
+// 并发结果退化为 last-write-wins——语义上是合法的，不会再产出坏 JSON。
 func writeJSON(path string, v any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmp := f.Name()
+	// CreateTemp 建的是 0600；数据目录里的文件历来是 0644，保持一致
+	if err := f.Chmod(0o644); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func readJSON(path string, v any) error {
