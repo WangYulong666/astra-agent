@@ -17,7 +17,19 @@ LOCK="$ROOT/third_party/upstream.lock.toml"
 # 代理：优先用 ASTRA_PROXY，否则沿用仓库的 git http.proxy（本机经过 Clash）
 PROXY="${ASTRA_PROXY:-$(git -C "$ROOT" config --get http.proxy 2>/dev/null || true)}"
 CURL_OPTS=(-sSL --max-time 180)
-[ -n "$PROXY" ] && CURL_OPTS+=(-x "$PROXY")
+# git config 里的代理可能是很久以前设的（Clash 关掉后那个端口就没人监听）。
+# 不探测的话每个请求都要先撞一次连接失败，5 个文件就是 5 次超时等待——
+# 看起来像「下载挂了」，其实只是代理死了。探一次，不通就走直连。
+if [ -n "$PROXY" ]; then
+  if curl -s -m 3 -o /dev/null -x "$PROXY" https://api.github.com/zen 2>/dev/null; then
+    CURL_OPTS+=(-x "$PROXY")
+  else
+    printf '  (代理 %s 连不上，本次走直连)\n' "$PROXY" >&2
+    # 关键：并行 worker 与 tarball 分支都从 PROXY / ASTRA_PROXY_EFF 取值，
+    # 只把 CURL_OPTS 里的 -x 去掉是不够的——它们会自己再加回来。
+    PROXY=""
+  fi
+fi
 
 # 匿名 API 限额 60 次/小时，批量拉取时建议给个 token（只需 public_repo 读权限）
 API_HDRS=(-H 'Accept: application/vnd.github.raw')
@@ -115,23 +127,51 @@ fetch_submodule() {
   local name="$1" repo="$2" commit="$3" dest="$4"
   local abs="$ROOT/$dest"
 
-  if git -C "$ROOT" config --file .gitmodules --get-regexp "path" 2>/dev/null | grep -qx "submodule\..*\.path $dest"; then
-    info "$name: submodule 已登记，按 commit 检出"
-    git -C "$ROOT" submodule update --init --depth 1 -- "$dest" 2>/dev/null || true
-  elif [ -d "$abs/.git" ] || [ -f "$abs/.git" ]; then
-    info "$name: 目录已存在且是 git 仓库，跳过 add"
+  # 已经检出到目标 commit 就跳过网络。理由：上游整仓 351MB，
+  # `submodule update` 每次都会去连远端，即使本地已经就绪——
+  # 没网的机器上 `make sync` 会被这一下卡住，而它其实什么都不用做。
+  if [ -d "$abs" ] && [ "$(git -C "$abs" rev-parse HEAD 2>/dev/null)" = "$commit" ]; then
+    info "$name: 已就绪 @ ${commit:0:12}，跳过网络"
   else
-    info "$name: 添加 submodule $repo"
-    git -C "$ROOT" submodule add --depth 1 "$repo" "$dest" 2>&1 | sed 's/^/    /'
+    if git -C "$ROOT" config --file .gitmodules --get-regexp "path" 2>/dev/null | grep -qx "submodule\..*\.path $dest"; then
+      info "$name: submodule 已登记，按 commit 检出"
+      git -C "$ROOT" submodule update --init --depth 1 -- "$dest" 2>/dev/null || true
+    elif [ -d "$abs/.git" ] || [ -f "$abs/.git" ]; then
+      info "$name: 目录已存在且是 git 仓库，跳过 add"
+    else
+      info "$name: 添加 submodule $repo"
+      git -C "$ROOT" submodule add --depth 1 "$repo" "$dest" 2>&1 | sed 's/^/    /'
+    fi
+
+    [ -d "$abs" ] || die "$name: submodule 目录不存在：$abs"
+    info "$name: 检出 ${commit:0:12}"
+    git -C "$abs" fetch --depth 1 origin "$commit" 2>/dev/null || true
+    git -C "$abs" checkout -q "$commit" 2>/dev/null || {
+      git -C "$abs" fetch origin 2>/dev/null || true
+      git -C "$abs" checkout -q "$commit"
+    }
   fi
 
-  [ -d "$abs" ] || die "$name: submodule 目录不存在：$abs"
-  info "$name: 检出 ${commit:0:12}"
-  git -C "$abs" fetch --depth 1 origin "$commit" 2>/dev/null || true
-  git -C "$abs" checkout -q "$commit" 2>/dev/null || {
-    git -C "$abs" fetch origin 2>/dev/null || true
-    git -C "$abs" checkout -q "$commit"
-  }
+  # 稀疏检出：submodule 也能「只把需要的子树放进工作区」。
+  # 关键区别——不是删上游文件：
+  #   · 删文件会让 submodule 变脏（git status 有改动），GitHub 上看到的也不再是干净上游
+  #   · sparse-checkout 只写本地配置，不动 commit，上游完整性不受影响
+  # 所以「裁切」在这里是检出范围，不是修改源码。
+  local paths
+  paths="$(source_paths "$name")"
+  if [ -n "$paths" ]; then
+    local dirs=()
+    while IFS= read -r p; do
+      [ -n "$p" ] && dirs+=("${p%/}")
+    done <<< "$paths"
+    if [ "${#dirs[@]}" -gt 0 ]; then
+      info "$name: 稀疏检出 ${#dirs[@]} 项（其余目录不进工作区）"
+      git -C "$abs" sparse-checkout init --cone 2>/dev/null || true
+      # cone 模式下根目录文件始终包含，正好覆盖 package.json / LICENSE / NOTICE 这类根元数据
+      git -C "$abs" sparse-checkout set "${dirs[@]}" 2>&1 | sed 's/^/    /'
+    fi
+  fi
+
   ok "$name @ $(git -C "$abs" rev-parse --short HEAD)"
 }
 

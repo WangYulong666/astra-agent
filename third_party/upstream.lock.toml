@@ -71,41 +71,42 @@ GitHub 把本仓库标为 NOASSERTION，仅因为「混合许可 + 腾讯自定�
 # ─────────────────────────────────────────────────────────────
 [[source]]
 name        = "deepseek-harness"
-mode        = "sparse"
+mode        = "submodule"
 repo        = "https://github.com/deepseek-ai/deepseek-harness.git"
 ref         = "master"
 commit      = "f3803c96974ad4a94195fb97e5c637e9c2a3afe3"
 license     = "MIT"
 dest        = "third_party/deepseek-harness"
-size_hint   = "整仓 317 MB；实际取 ACP 包 + core 引擎，约 2.7 MB / 300 个文件"
+size_hint   = "整仓 351.8 MB；sparse-checkout 后工作区约 2.7 MB / 340 个文件"
 purpose     = """
 沙箱内 agent 运行时，`dsh --profile acp` 启动。
 引入源码的目的不是构建（运行时用 dsh-trim/ 从 npm 装的裁剪版），而是：
   · 审计——ACP 实现、权限模型、遥测行为必须可读
   · 扩展——未来平台能力以 DSH 插件形式下沉，比只能走 MCP 更深入
   · 对比——上游一改，能立刻 diff 出对 ACP 的影响
-取这三个子树，正好覆盖上面三条：
+sparse-checkout 保留的子树，正好覆盖上面三条：
   · packages/acp/    ACP 协议实现（含 request_permission 语义、能力声明）
   · packages/core/   agent 引擎（agent-loop / session / tools / tool-executor）
   · 根目录元数据      package.json / pnpm-workspace.yaml / THIRD_PARTY_NOTICES.md / SAFETY.md
+                       （cone 模式自动包含根文件，不必单列）
 """
 note = """
-为什么不是 tarball 全量快照（虽然脚本支持）：
-  整仓 317MB，本机链路对大文件持续限速（codeload 实测从 254KB/s 掉到 11KB/s），
-  单个 tarball 拉到一半必然超时；而 api.github.com 的小请求稳定 1 秒内返回。
-  所以改成「按需取子树」：约 300 次小请求，并发 8 路，1 分钟内落地。
-  ⇒ 需要全量时把 mode 改回 "tarball" 再 fetch，脚本无需改动。
-为什么不是 submodule：
-  git 协议拉这个仓库持续报 `RPC failed; curl 28 Operation too slow (<1000 bytes/sec)`。
+为什么是 submodule 而不是把文件拷进来（曾经就是这么做的）：
+  · GitHub 上点进去直接跳上游原仓库与具体 commit —— 审计时不必「相信我们的拷贝」
+  · 升级 = 改一行 commit，不用重新下载 340 个文件
+  · 许可与归属天然可追溯（MIT 要求保留版权声明，上游 LICENSE 随 submodule 就在）
+代价与对策：
+  整仓 351.8 MB，直接 `git submodule update --init` 会全量检出；
+  SSH 实测连握手阶段都能卡 5 分钟没动静。所以 fetch 走
+  `--filter=blob:none`（只拉 commit+tree，实测 27 秒）+ `--depth 1` + sparse-checkout，
+  只在工作区放两个 packages 子树。见 scripts/sync-upstream.sh 的 fetch_submodule。
+为什么裁切用 sparse-checkout 而不是删文件：
+  删文件会让 submodule 变脏（git status 有改动），GitHub 上看到的也不再是干净上游；
+  sparse-checkout 只写本地配置、不动 commit，上游完整性不受影响。
 ⚠️ 运行时**不要**用这份源码构建。版本以 dsh-trim/package.json 钉死的精确版本为准。
-⚠️ 上游仍是预发布（v0.2.1-rc.x），自称会有兼容性破坏。升级当独立任务做，别顺手 bump。
+⚠️ 上游仍是预发布（v0.2.2-rc.x），自称会有兼容性破坏。升级当独立任务做，别顺手 bump。
 """
 paths = [
-  "package.json",
-  "pnpm-workspace.yaml",
-  "THIRD_PARTY_NOTICES.md",
-  "SAFETY.md",
-  "README.md",
   "packages/acp/",
   "packages/core/",
 ]

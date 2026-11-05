@@ -36,3 +36,4 @@
 - 多租户隔离粒度：按 namespace / 按节点池 / 混合（M4 前定）
 - 审批注册表从内存迁到 PG 的具体形态（多副本前定，见 ADR-0010）
 - 是否保留 `byo_runtime`（用户自带 CLI 直接跑）模式
+| [0013](0013-dsh-as-submodule.md) | deepseek-harness 改为 submodule + 稀疏检出 | 已采纳 |

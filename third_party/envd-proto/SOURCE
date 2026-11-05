@@ -1,10 +1,12 @@
 # 自动生成，勿手改。升级请改 third_party/upstream.lock.toml 后跑 sync-upstream.sh
-repo   = https://github.com/e2b-dev/runtime.git
-commit = 518278060a154124a80d98f37253f8af77baf478
-mode   = sparse（只取下列文件，不是整仓）
+repo    = https://github.com/e2b-dev/runtime.git
+commit  = 518278060a154124a80d98f37253f8af77baf478
+mode    = sparse（只取下列范围，不是整仓）
 license = 见同目录 LICENSE
-fetched = 2026-10-28T10:00:12Z
-files:
+fetched = 2026-11-05T08:41:26Z
+files   = 5
+
+lock 里声明的范围（目录项已递归展开）：
   - packages/envd/spec/filesystem/filesystem.proto
   - packages/envd/spec/process/process.proto
   - packages/envd/spec/upgrade/handover.proto

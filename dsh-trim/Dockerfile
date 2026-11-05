@@ -38,11 +38,11 @@ COPY verify-acp.mjs ./
 # node_modules 是 dsh 的实质部分，所以必须把上游 MIT 全文带进镜像。
 #
 # 为什么用 heredoc 而不是 COPY 一个 LICENSE 文件：
-#   本文件所在目录（dsh-trim/）就是构建上下文，third_party/deepseek-harness/LICENSE
+#   本文件所在目录（dsh-trim/）就是构建上下文，third_party/deepseek-harness/LICENSE（submodule，需先 bash scripts/sync-upstream.sh fetch）
 #   在上下文之外，COPY ../third_party/... 会被 Docker 直接拒绝；
 #   ADD https://raw.githubusercontent.com/... 要求构建期能出网（内网/CI 不保证）。
 #   heredoc 既不吃上下文也不吃网络，唯一代价是文本要跟着上游手工同步——
-#   上游 LICENSE 只在换版本时才变，改这里时同步核对 third_party/deepseek-harness/LICENSE。
+#   上游 LICENSE 只在换版本时才变，改这里时同步核对 third_party/deepseek-harness/LICENSE（submodule，需先 bash scripts/sync-upstream.sh fetch）。
 COPY --chown=node:node <<'THIRD_PARTY_NOTICES_EOF' /opt/dsh/THIRD_PARTY_NOTICES
 astra-agent —— 沙箱内 dsh 运行镜像的第三方声明
 ================================================================================

@@ -1,5 +1,9 @@
 # 0007. 上游依赖一律源码引入，且必须可同步
 
+> ⚠️ **2026-11-05 部分取代**：deepseek-harness 已从 `sparse`（逐文件下载）改为
+> `submodule + blobless + sparse-checkout`，见 [ADR-0013](0013-dsh-as-submodule.md)。
+> 本文保留下的是当时的取舍过程与实测数据，结论中关于 dsh 引入方式的部分已过时。
+
 - **状态**：已采纳
 - **日期**：2026-10-28
 - **相关**：`third_party/README.md`、`scripts/sync-upstream.sh`

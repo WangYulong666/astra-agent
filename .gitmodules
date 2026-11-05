@@ -1,3 +1,11 @@
 [submodule "third_party/cubesandbox"]
 	path = third_party/cubesandbox
 	url = https://github.com/TencentCloud/CubeSandbox.git
+
+[submodule "third_party/deepseek-harness"]
+	path = third_party/deepseek-harness
+	url = https://github.com/deepseek-ai/deepseek-harness.git
+	shallow = true
+	# 整仓 351MB，但只用到 ACP 协议实现与 core 引擎两个子树。
+	# 用 sparse-checkout 缩小工作区，而不是删文件——删了 submodule 就变脏，
+	# GitHub 上看到的也不再是干净的上游。恢复方式：bash scripts/sync-upstream.sh fetch
