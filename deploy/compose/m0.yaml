@@ -1,0 +1,55 @@
+# M0 单机环境
+#
+# 能验证什么：
+#   agent 服务（dsh + acp-proxy）——ACP 全链路、单客户端互斥、断连重连、跨进程 resume
+#
+# 不能验证什么：
+#   CubeSandbox —— 需要 linux/x86_64 + /dev/kvm + XFS 直盘。
+#                  macOS（arm64）上起不来，这里也不假装能起。
+#                  真沙箱环境用 deploy/k8s/（或 CubeSandbox 自带的 compose）。
+#
+# 为什么这样切：M0 的两根支柱里，「ACP 能不能驱动 agent」占一根，而它**不需要沙箱**。
+# 先在本机把协议层钉死，再上云机器折腾 KVM，顺序反过来会浪费好几天。
+#
+# 用法：
+#   docker compose -f deploy/compose/m0.yaml up -d --build
+#   go run ./cmd/acp-smoke -url ws://127.0.0.1:8080/acp -token dev-token -skip-prompt
+
+name: astra-m0
+
+services:
+  agent:
+    build:
+      context: ../..
+      dockerfile: images/agent/Dockerfile
+    image: astra/agent-dsh:0.2.1-rc.2
+    container_name: astra-m0-agent
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      # acp-proxy 从环境变量读鉴权 token
+      ASTRA_PROXY_TOKEN: dev-token
+      # ⚠️ 仅为本地把 prompt 跑通。生产环境绝不能把真实 LLM key 放进沙箱
+      #    （架构约束：沙箱内 agent 的 base_url 指向自建网关，只拿短期租户令牌）。
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    volumes:
+      - agent-workspace:/workspace
+      # dsh 的会话持久化落在这里；跨进程 resume 能成功全靠它
+      - agent-state:/var/lib/dsh
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 3s
+      start_period: 25s
+      retries: 3
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  agent-workspace:
+  agent-state:

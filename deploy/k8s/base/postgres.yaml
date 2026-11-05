@@ -1,0 +1,112 @@
+# 开发 / 自测用 PostgreSQL
+#
+# 为什么清单里带一个 PG：一期把 sqlite 换成了 PG（租户、计费、多副本共享），
+# 没有 PG 的话 astra-api 的 -store postgres 起不来、/readyz 永远 503。
+# 但**生产不该用这个**：
+#   - 单副本、无备份、无 PITR、无连接池中间件；
+#   - 数据跟 k3s 的 local-path 绑在同一个节点上，节点挂了数据就跟着挂。
+#
+# ⇒ 生产用法：
+#   1. 把 deploy/k8s/base/kustomization.yaml 里 `- postgres.yaml` 这行注释掉；
+#   2. 用云 RDS / 独立 PG 集群，把连接串写进 Secret `astra-db` 的 dsn；
+#   3. dsn 里用 sslmode=require（本文件默认 disable，只因为开发环境没有证书）。
+#
+# 命名空间说明：base/kustomization.yaml 有全局 `namespace: astra-system`，
+# kustomize 会把这里的资源一并改写到 astra-system，所以 Service 的 DNS 是
+# postgres.astra-system.svc —— 与 secret 里 dsn 的主机名必须一致。
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: astra-system
+  labels: { app: postgres }
+spec:
+  # headless：StatefulSet 要稳定 DNS。单副本场景够用，
+  # 以后要加只读副本也是在这个 Service 上扩。
+  clusterIP: None
+  selector: { app: postgres }
+  ports:
+    - { name: pg, port: 5432, targetPort: pg }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: astra-system
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: { app: postgres }
+  template:
+    metadata:
+      labels: { app: postgres }
+    spec:
+      securityContext:
+        # postgres 官方镜像里 postgres 用户是 uid/gid 70；fsGroup 让 PVC 可写
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - { name: pg, containerPort: 5432 }
+          env:
+            - { name: POSTGRES_USER, value: astra }
+            - { name: POSTGRES_DB, value: astra }
+            # 密码来自 Secret，且必须与 astra-db 的 dsn 里那个密码一致
+            # （示例见 secret.example.yaml，真值用 kubectl create secret 注入）
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: astra-db, key: postgres-password } }
+            # 数据落到子目录：PVC 挂载点直接给 PGDATA 的话，
+            # ext4/xfs 的 lost+found 会让 initdb 拒绝初始化。
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          # pg_isready 是镜像自带的，比 TCP 探针准：端口开了但库还在恢复时
+          # TCP 会通，pg_isready 会拒绝连接。
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U astra -d astra -h 127.0.0.1"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U astra -d astra -h 127.0.0.1"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits:   { memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            # 只读根文件系统：postgres 只往 PGDATA 与 /var/run 写东西，
+            # 这两个位置下面都挂出来了，所以根目录可以只读。
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            # unix socket 目录，官方 entrypoint 会 chmod 它
+            - { name: run, mountPath: /var/run/postgresql }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+  # PVC 由 StatefulSet 自己建（data-postgres-0）。
+  # 用 volumeClaimTemplates 而不是单独一个 PVC：删 pod 不删盘，
+  # 只有删 StatefulSet + 手动删 PVC 才会丢数据，误操作面更小。
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # k3s 自带 local-path；其他集群没这个 StorageClass 的话改成自己的
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 20Gi

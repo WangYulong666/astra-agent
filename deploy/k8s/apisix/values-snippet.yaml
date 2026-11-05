@@ -1,0 +1,62 @@
+# APISIX 关键配置（语义清单）
+#
+# ⚠️ 字段名以 `helm show values apisix/apisix` 的实际输出为准 —— 本文件给的是
+#    「必须覆盖哪些项、为什么」，而不是可直接 helm install 的完整 values。
+#    APISIX 原生 conf/config.yaml 的路径是确定的（nginx_config.http_config），
+#    Helm chart 只是把它包了一层。
+
+apisix:
+  replicaCount: 2          # 数据面；流量涨扩这个，扩 controller 没意义
+
+  # SSE 的兜底。ApisixRoute 只能关 request_buffering，
+  # 读超时必须在 Nginx 层设，否则默认 60s 一到就断流。
+  # 这两个值作用于所有路由，普通 REST 有自己的业务超时，不受影响。
+  nginxConfig:
+    http: |
+      proxy_read_timeout 3600s;
+      proxy_send_timeout 3600s;
+      proxy_buffering off;
+      # WebSocket 长连接场景，避免上游 keepalive 被长连接占满
+      keepalive_timeout 3600s;
+      keepalive_requests 10000;
+
+  # 插件里要用到的变量要在 Nginx 层声明（APISIX 的 lua 拿不到未声明变量）
+  # 例：limit-count 用 remote_addr 时通常已内置，但自定义 header 需要显式声明
+
+etcd:
+  replicaCount: 3          # 配置库，单点挂了 APISIX 无法写配置（读还能继续）
+  auth:
+    rbac:
+      create: true
+  persistence:
+    size: 8Gi
+
+ingress-controller:
+  enabled: true
+  # Gateway API 是新部署的推荐方式，同时保留 Ingress/CRD 兼容
+  config:
+    apisix:
+      serviceNamespace: astra-system
+
+# MetalLB 给 Gateway 一个 VIP。自建集群没有云 LB，不加这个 Gateway 会一直 Pending。
+# 注意地址池不能和 DHCP 段冲突。
+# 下面的 192.0.2.10 是 RFC 5737 文档示例地址（TEST-NET-1），照抄是连不上的，
+# 必须换成自己集群网段里未被占用的 VIP。
+---
+# MetalLB 地址池（单独 apply，不需要 helm）
+# apiVersion: metallb.io/v1beta1
+# kind: IPAddressPool
+# metadata:
+#   name: astra-pool
+#   namespace: metallb-system
+# spec:
+#   addresses:
+#     - 192.0.2.10/32
+# ---
+# apiVersion: metallb.io/v1beta1
+# kind: L2Advertisement
+# metadata:
+#   name: astra-l2
+#   namespace: metallb-system
+# spec:
+#   ipAddressPools: [astra-pool]

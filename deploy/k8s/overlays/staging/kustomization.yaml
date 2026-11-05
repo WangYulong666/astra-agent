@@ -1,0 +1,22 @@
+# staging overlay
+#
+# 存在的唯一理由：让 deploy/ci/gitops-bump.sh 有地方改 newTag。
+# 那个脚本 `sed s/newTag: .*/newTag: <tag>/` 改的就是本文件的 images 段，
+# 改完提交，ArgoCD 检测到 git 变化后同步 —— 线上跑的是哪个 commit 一目了然。
+#
+# 如果不需要「改 git 发布」这条路（比如直接 kubectl apply -k base），
+# 这个目录可以整个删掉，不影响 base。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: astra-system
+resources:
+  - ../../base
+images:
+  - name: harbor.astra.local/astra/astra-api
+    newTag: latest
+  - name: harbor.astra.local/astra/astra-worker
+    newTag: latest
+  - name: harbor.astra.local/astra/astra-sandboxd
+    newTag: latest
+  - name: harbor.astra.local/astra/astra-gateway
+    newTag: latest

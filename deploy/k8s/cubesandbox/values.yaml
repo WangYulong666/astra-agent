@@ -1,0 +1,87 @@
+# CubeSandbox Helm 覆盖项（语义清单）
+#
+# ⚠️ 同上：字段名以 `helm show values <官方 chart>` 实际输出为准。
+#    版本锁定 v0.7.0（v0.4.0 之前的 eBPF checksum bug 会让同节点访问沙箱端口全不通，别用）。
+#
+# 官方 chart 的默认形态是「开箱能跑」，但生产必须覆盖下面五类。
+
+# ── 1. 计算面只落在 cube 节点池 ──────────────────────────────
+# 不给 nodeSelector 的话，privileged 的 Big Pod 可能被调度到业务节点，
+# 等于把 /dev/kvm 和 hostPID 暴露在跑业务 pod 的机器上。
+nodeSelector:
+  astra.io/cube-node: "true"
+tolerations:
+  - key: astra.io/cube-node
+    operator: Equal
+    value: "true"
+    effect: NoSchedule
+
+# ── 2. 数据盘必须是独立的 XFS ────────────────────────────────
+# 默认走 25GiB loopback XFS（试用可以，生产不行：性能差且随 pod 生命周期漂移）。
+# 生产给每台计算节点挂独立盘到 /data/cubelet。
+cubelet:
+  dataDir: /data/cubelet
+  hostPaths:
+    - /dev/kvm            # KVM 设备
+    - /data/cubelet       # 沙箱数据（XFS + reflink 必须是真盘）
+    - /var/lib/cubelet    # 状态
+  # cubelet 会「杀掉父进程自己变孤儿」，与容器 PID 1 冲突。
+  # 官方 chart 新版可能已处理；若启动即崩，用 tini 作 PID 1 + 后台启动 + preStop。
+  useTini: true
+
+# ── 3. privileged 是硬要求，不能降级 ────────────────────────
+# 计算面需要 hostPID + SYS_ADMIN + /dev/kvm + eBPF 加载能力。
+# 这决定了 astra-cube 命名空间必须是 privileged PodSecurity（见 namespace.yaml）。
+securityContext:
+  privileged: true
+  hostPID: true
+
+# ── 4. 计算面 pod 的 resources 不能卡死 ─────────────────────
+# k8s 调度 pod、CubeMaster 调度沙箱，两套调度器。如果给 pod 设了紧的
+# cpu/memory limits，Cube 的 overcommit 会被 cgroup 卡住，表现为沙箱创建超时。
+# ⇒ 计算面给足 requests，limits 不设或设得很大。
+resources:
+  requests:
+    cpu: "12"
+    memory: 24Gi
+  # limits 刻意不写
+
+# ── 5. 模板存储不能丢 ───────────────────────────────────────
+# CubeMaster 挂 PV 存模板。丢了要全量重建（一个模板构建几分钟到几十分钟）。
+cubeMaster:
+  persistence:
+    enabled: true
+    size: 100Gi
+
+# ── 6. 依赖组件按 Astra 现有选型替换 ────────────────────────
+# 官方默认 MySQL + Redis。Astra 红线：
+#   Redis ≥7.4 是 RSALv2/SSPL ⇒ 换 Valkey（BSD-3）
+#   MySQL 是 GPL v2 ⇒ 优先 PG（与 astra 统一，少一套备份体系）
+# 若 Cube 只支持 MySQL 二进制协议，则单独起一个 MySQL 实例隔离，
+# 不与业务库共用（GPL 传染性在「独立进程 + 网络协议交互」下不成立，
+# 但要写进合规说明）。
+mysql:
+  enabled: false
+externalDatabase:
+  type: postgresql
+  host: postgres.astra-data.svc
+  port: 5432
+redis:
+  enabled: false
+externalRedis:
+  host: valkey.astra-data.svc
+  port: 6379
+
+# ── 7. 集群 DNS 要放行给沙箱 ────────────────────────────────
+# 坑：CubeVS 的默认拒绝 CIDR 几乎覆盖所有 k8s pod/service 网段，
+# 沙箱内 DNS 解析会全超时（现象像"网络不通"，实际是策略没放行 resolver）。
+# ⇒ 显式 allow_out 集群 Service CIDR，并确认 Cubelet 放行了 resolver 的 /32。
+network:
+  allowOut:
+    - 10.43.0.0/16      # k3s 默认 Service CIDR
+    - 10.42.0.0/16      # k3s 默认 Pod CIDR
+  # 沙箱到 astra-gateway 是唯一必要出网，其余全拒
+  # 具体按租户在运行时用 PUT /sandboxes/:id/network 下发，不在这里全局开
+
+# ── 8. cubelet 的 PID 1 ────────────────────────────────────
+# 见上面 §2 的 cubelet.useTini —— 同一个键不能写两次（YAML 重复键会让整个文件解析失败）。

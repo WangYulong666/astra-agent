@@ -1,0 +1,101 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: 质量门（fmt / vet / test）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # dist 已提交（go:embed 编译期需要），占位只兜极端情况：
+      # 目录万一缺失时保证 go build 能过（真实产物在 build job 里重新生成）。
+      - name: 确保 web/dist 存在（embed 需要）
+        run: mkdir -p internal/api/web/dist && touch internal/api/web/dist/index.html
+
+      - name: gofmt 检查（非空即失败）
+        run: |
+          files=$(gofmt -l $(find . -name '*.go' -not -path './third_party/*' -not -path './vendor/*'))
+          if [ -n "$files" ]; then
+            echo "以下文件未 gofmt："
+            echo "$files"
+            exit 1
+          fi
+
+      # 明确限定范围，避免把 third_party/ 的上游代码拉进检查
+      - name: go vet
+        run: go vet ./cmd/... ./internal/...
+
+      # 先显式拉依赖：失败点单列一行，比淹在编译输出里好定位
+      - name: go mod download
+        run: go mod download
+
+      - name: go test
+        env:
+          TZ: Asia/Shanghai
+        run: go test ./cmd/... ./internal/... -count=1 -timeout 600s
+
+      # ⚠️ 本机 npmrc 指向 registry.npmmirror.com，lock 里的 resolved 也全绑在这个镜像上。
+      # GitHub runner 在境外，拉镜像会超时/5xx——这是「本地全绿、CI 必红」的典型成因。
+      # 只改 CI 里的副本，不动仓库里的 lock（本机继续用镜像，速度不受影响）。
+      - name: 前端测试
+        working-directory: web
+        env:
+          TZ: Asia/Shanghai
+        run: |
+          sed -i 's|registry.npmmirror.com|registry.npmjs.org|g' package-lock.json
+          npm ci --no-audit --no-fund
+          npm test
+
+  build:
+    name: 交叉编译验证（linux/amd64）
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 用真实前端产物内嵌，验证「前端 → Go 二进制」完整链路
+      - name: 构建前端
+        working-directory: web
+        env:
+          TZ: Asia/Shanghai
+        run: |
+          sed -i 's|registry.npmmirror.com|registry.npmjs.org|g' package-lock.json
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: 交叉编译 linux/amd64（CGO_ENABLED=0，modernc sqlite 纯 Go）
+        run: |
+          mkdir -p dist/ci
+          for target in astra-server acp-proxy acp-shell-agent; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+              go build -ldflags "-s -w" -o "dist/ci/$target" "./cmd/$target"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: astra-linux-amd64
+          path: dist/ci/
+          if-no-files-found: error

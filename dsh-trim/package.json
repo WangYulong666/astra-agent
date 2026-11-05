@@ -1,0 +1,12 @@
+{
+  "name": "astra-dsh-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Astra 沙箱内 CLI agent：dsh ACP headless 裁剪版",
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.2.1-rc.2"
+  },
+  "overrides": {
+    "zod": "4.4.3"
+  }
+}

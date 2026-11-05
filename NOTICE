@@ -1,0 +1,125 @@
+astra-agent
+Copyright 2026 Wang Yulong
+
+本产品包含由第三方开发的软件。本文件按 Apache License 2.0 第 4(d) 条，
+汇总随本产品分发的第三方组件的署名与告知信息（NOTICE）。
+
+完整许可正文见各依赖目录下的 LICENSE 文件——源码引入的依赖见
+third_party/<name>/LICENSE，Go 模块依赖见模块缓存中对应版本的 LICENSE。
+
+================================================================================
+一、源码引入的上游依赖（third_party/）
+================================================================================
+
+| 组件            | 版本锁定（commit）                         | 许可        |
+|-----------------|--------------------------------------------|-------------|
+| CubeSandbox     | 0fea4f8c365f8105a47ce2e0b2dc2cffd1ac363d   | Apache-2.0  |
+| DeepSeek Harness| f3803c96974ad4a94195fb97e5c637e9c2a3afe3   | MIT         |
+| envd-proto      | 518278060a154124a80d98f37253f8af77baf478   | Apache-2.0  |
+
+版本、来源与引入理由的唯一事实来源是 third_party/upstream.lock.toml。
+
+--------------------------------------------------------------------------------
+1. CubeSandbox —— Apache-2.0
+   https://github.com/TencentCloud/CubeSandbox
+   Copyright (C) 2026 Tencent. All rights reserved.
+
+   CubeSandbox 在其 LICENSE 中附带了第三方组件清单。本项目分发的是其源码，
+   因此以下内嵌组件同样随本产品分发：
+
+     · kata-containers         Apache-2.0（上游声明有修改）
+     · cloud-hypervisor        Apache-2.0（上游声明有修改）
+     · cilium/bpf              BSD-2-Clause OR GPL-2.0 双许可，
+                               上游明确选择 BSD-2-Clause
+
+   CubeSandbox 源码树内另有若干独立许可文件，本项目未逐项改动，原样保留：
+
+     · hypervisor/LICENSE-APACHE                Apache-2.0
+     · hypervisor/LICENSE-BSD-3-Clause          BSD-3-Clause（Chromium OS Authors）
+     · hypervisor/virtiofsd/LICENSE-APACHE      Apache-2.0
+     · hypervisor/virtiofsd/LICENSE-BSD-3-Clause BSD-3-Clause（Chromium OS Authors）
+     · hypervisor/docs/COPYING.docs             CC-BY-4.0
+
+   注意：hypervisor/docs/ 下的文档使用 CC-BY-4.0，属于「署名即合规」的引用型
+   许可，不具传染性，但再分发这些文档时须保留署名。详见
+   third_party/upstream.lock.toml 中 cubesandbox 的 license_note。
+
+--------------------------------------------------------------------------------
+2. DeepSeek Harness —— MIT
+   https://github.com/deepseek-ai/deepseek-harness
+   Copyright (c) 2026 DeepSeek
+
+   本产品在运行时（dsh-trim 镜像）与源码审计（third_party/deepseek-harness/）
+   两处包含该组件。MIT 全文见 third_party/deepseek-harness/LICENSE，
+   并随 dsh-trim 镜像以 /opt/dsh/THIRD_PARTY_NOTICES 形式一并分发。
+
+--------------------------------------------------------------------------------
+3. envd-proto —— Apache-2.0
+   https://github.com/e2b-dev/runtime
+   Copyright 2023 FoundryLabs, Inc.（上游 LICENSE 附录中的版权行）
+
+   本项目仅引入 5 个 .proto 协议定义文件，不含运行时代码。
+
+================================================================================
+二、Go 模块依赖中的 NOTICE
+================================================================================
+
+以下 github.com/prometheus/* 模块以 Apache-2.0 授权且各自附带 NOTICE。
+按 Apache-2.0 第 4(d) 条，其 NOTICE 内容随本产品一并保留如下。
+
+--------------------------------------------------------------------------------
+github.com/prometheus/client_golang v1.25.0
+--------------------------------------------------------------------------------
+Prometheus instrumentation library for Go applications
+Copyright 2012-2015 The Prometheus Authors
+
+This product includes software developed at
+SoundCloud Ltd. (http://soundcloud.com/).
+
+The following components are included in this product:
+
+perks - a fork of https://github.com/bmizerany/perks
+https://github.com/beorn7/perks
+Copyright 2013-2015 Blake Mizerany, Björn Rabenstein
+See https://github.com/beorn7/perks/blob/master/README.md for license details.
+
+Go support for Protocol Buffers - Google's data interchange format
+http://github.com/golang/protobuf/
+Copyright 2010 The Go Authors
+See source code for license details.
+
+--------------------------------------------------------------------------------
+github.com/prometheus/client_model v0.6.3
+--------------------------------------------------------------------------------
+Data model artifacts for Prometheus.
+Copyright 2012-2015 The Prometheus Authors
+
+This product includes software developed at
+SoundCloud Ltd. (http://soundcloud.com/).
+
+--------------------------------------------------------------------------------
+github.com/prometheus/common v0.72.0
+--------------------------------------------------------------------------------
+Common libraries shared by Prometheus Go components.
+Copyright 2015 The Prometheus Authors
+
+This product includes software developed at
+SoundCloud Ltd. (http://soundcloud.com/).
+
+--------------------------------------------------------------------------------
+github.com/prometheus/procfs v0.22.0
+--------------------------------------------------------------------------------
+procfs provides functions to retrieve system, kernel and process
+metrics from the pseudo-filesystem proc.
+
+Copyright 2014-2015 The Prometheus Authors
+
+This product includes software developed at
+SoundCloud Ltd. (http://soundcloud.com/).
+
+================================================================================
+三、其余 Go 模块依赖
+================================================================================
+
+go.mod / go.sum 中的其余模块均为 Apache-2.0 / MIT / BSD 系许可，未附带独立
+NOTICE 文件，其许可正文随模块源码分发。完整清单见 go.sum。

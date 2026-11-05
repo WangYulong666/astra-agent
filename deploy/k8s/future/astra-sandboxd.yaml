@@ -1,0 +1,94 @@
+# astra-sandboxd：沙箱池管理（预热、健康检查、回收）
+#
+# ⚠️ 现状：`cmd/sandboxd` 也不存在，本文件与 astra-worker.yaml 一样是接口契约。
+#    详见 deploy/README.md「未实现的部分」。
+#
+# 逻辑上只能有一个 master 在管沙箱池 —— 两个实例同时 create/kill 会打架。
+# 但跑 1 个副本又是单点（它挂了整个平台开不出新沙箱），所以：
+#   跑 2 副本 + k8s Lease 选主，standby 不干活但随时接管。
+#
+# 注意：这里刻意用 k8s Lease 而不是 PG advisory lock。
+#   沙箱池是「节点级」资源，跟着集群走；会话锁是「数据级」资源，跟着 PG 走。
+#   混用会让"PG 挂了但集群还在"和"集群重建但 PG 保留"两种情况都出错。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: astra-sandboxd
+  namespace: astra-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: astra-sandboxd }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels: { app: astra-sandboxd }
+      annotations:
+        # 9090 同时承载 /healthz /readyz /metrics —— 不再单独声明一个只跑指标的口
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: sandboxd
+          image: harbor.astra.local/astra/astra-sandboxd:latest
+          ports:
+            - { name: http, containerPort: 9090 }
+          env:
+            - { name: ASTRA_POD_NAME, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+            - { name: ASTRA_NAMESPACE, valueFrom: { fieldRef: { fieldPath: metadata.namespace } } }
+            # 选主用
+            - { name: ASTRA_LEADER_LEASE, value: astra-sandboxd-leader }
+            # 预热池目标水位：空闲沙箱数，按租户分别维护
+            - { name: ASTRA_WARM_POOL_MIN, value: "2" }
+            - { name: ASTRA_WARM_POOL_MAX, value: "10" }
+            - name: ASTRA_CUBE_API
+              valueFrom: { configMapKeyRef: { name: astra-config, key: cube-api-url } }
+            - name: ASTRA_CUBE_TOKEN
+              valueFrom: { secretKeyRef: { name: astra-cube, key: api-token } }
+            - name: ASTRA_PG_DSN
+              valueFrom: { secretKeyRef: { name: astra-db, key: dsn } }
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          # 就绪检查必须真的看依赖（Lease + cube API + PG），
+          # 否则 standby 也会被算成就绪，选主失败时没人发现
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits:   { memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: astra-sandboxd
+  namespace: astra-system
+spec:
+  selector: { app: astra-sandboxd }
+  ports:
+    - { name: http, port: 9090, targetPort: http }
+---
+# 选主用的 Lease 必须提前存在，否则两个副本可能各自建一个同名的（虽然 API 会拒，
+# 但报错信息很难懂）。由 sandboxd 自己 ensure 也行，这里显式声明便于审计。
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: astra-sandboxd-leader
+  namespace: astra-system
+spec:
+  leaseDurationSeconds: 15
+  # holderIdentity / acquireTime / renewTime 由 leader 运行时写入

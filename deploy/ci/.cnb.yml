@@ -1,0 +1,45 @@
+# CNB 流水线定义
+#
+# ⚠️ 事件名与 stages 结构请按你们 CNB 当前版本的语法核对 ——
+#    这份文件的价值在「阶段怎么分、每步调什么」，不在 YAML 关键字。
+#    同样的四步换成 GitLab CI / Gitea Actions 也是一一对应的。
+#
+# 设计原则：所有实际动作都调 deploy/ci/*.sh，YAML 只做编排。
+# 这样 M4 从 CNB 切到自建 CI 时，改的是这个文件，不是构建逻辑。
+
+main:
+  push:
+    - stages:
+        # 1) 静态检查 + 单测（失败就不该产镜像）
+        - name: verify
+          script: |
+            cd backend && go vet ./... && go test ./... -count=1
+
+        # 2) 构建镜像并推 Harbor
+        #    TAG 用 commit sha，不用 latest —— ArgoCD 要能精确对应到 commit
+        - name: build-image
+          script: |
+            export REGISTRY="${HARBOR_REGISTRY}"
+            export TAG="${CNB_COMMIT_SHORT}"
+            export PUSH=1
+            bash deploy/ci/build.sh
+
+        # 3) 改 git 里的镜像 tag（ArgoCD 据此同步）
+        #    注意：这一步要能推回仓库，CI 需要写权限的 token
+        - name: gitops-bump
+          script: |
+            bash deploy/ci/gitops-bump.sh "${CNB_COMMIT_SHORT}" staging
+
+  tag_push:
+    # 打 semver tag 时走生产发布，需要人工审批
+    - stages:
+        - name: build-image
+          script: |
+            export REGISTRY="${HARBOR_REGISTRY}"
+            export TAG="${CNB_TAG}"
+            export PUSH=1
+            bash deploy/ci/build.sh
+        - name: approve-and-release
+          # 生产同步前必须人工点确认（ArgoCD 侧也可以配 syncPolicy 手动）
+          script: |
+            bash deploy/ci/gitops-bump.sh "${CNB_TAG}" prod

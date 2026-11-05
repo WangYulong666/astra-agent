@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- hardened runtime 下允许 JIT（WKWebView 的 JS 引擎需要）与加载第三方 dylib（Wails 的 WKWebView 链接） -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<false/>
+	<!-- 沙箱内执行外部命令（local provider 起子进程）。不做 App Sandbox：agent 要访问用户授权的目录 -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<false/>
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
+</dict>
+</plist>

@@ -1,0 +1,78 @@
+# astra-gateway：LLM 网关 + 平台 MCP server
+#
+# ⚠️ 现状：`cmd/gateway` 不存在。一期 LLM 网关是 astra-api 进程内的 -llm-gateway
+#    能力（见 astra-api.yaml）；本文件是「网关拆出去」之后的接口契约，
+#    apply 会拉不到镜像。别把它当成网关已经独立部署的证据。
+#
+# 两个职责刻意合并在一个二进制：
+#   - LLM 网关：沙箱内 agent 的 base_url 指向这里，真 key 只存在这个进程里
+#   - MCP server：平台工具（publish_artifact / web_fetch / 读业务库）
+# 合并的理由是两者都要求「从沙箱内发起、但必须越过沙箱边界执行」，
+# 且都要做租户级限流和审计 —— 拆开就要复制一遍鉴权逻辑。
+#
+# 不对外暴露 http（只有沙箱和 api 能连）。外部 webhook 走 APISIX → 本 Service 的 /webhooks。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: astra-gateway
+  namespace: astra-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: astra-gateway }
+  template:
+    metadata:
+      labels: { app: astra-gateway }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8090"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: gateway
+          image: harbor.astra.local/astra/astra-gateway:latest
+          ports:
+            # 只开一个口：业务、探针、指标都在 8090 上（与 astra-api 同一约定）
+            - { name: http, containerPort: 8090 }
+          env:
+            # 真 key 只在这里。沙箱拿到的是短期租户令牌，可撤销、可限额。
+            - name: ASTRA_LLM_UPSTREAM_KEY
+              valueFrom: { secretKeyRef: { name: astra-llm, key: api-key } }
+            - name: ASTRA_LLM_UPSTREAM_BASE
+              valueFrom: { configMapKeyRef: { name: astra-config, key: llm-upstream } }
+            # 租户配额在这里判，不在 APISIX 判 —— 网关看不到单次 run 内的模型调用次数
+            - { name: ASTRA_QUOTA_BACKEND, value: "valkey" }
+            - name: ASTRA_VALKEY_ADDR
+              valueFrom: { configMapKeyRef: { name: astra-config, key: valkey-addr } }
+            - name: ASTRA_PG_DSN
+              valueFrom: { secretKeyRef: { name: astra-db, key: dsn } }
+            # 租户令牌签名密钥，与 JWT 用户令牌分开轮转
+            - name: ASTRA_SANDBOX_TOKEN_SECRET
+              valueFrom: { secretKeyRef: { name: astra-auth, key: sandbox-token-secret } }
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 300m, memory: 256Mi }
+            limits:   { memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: astra-gateway
+  namespace: astra-system
+spec:
+  selector: { app: astra-gateway }
+  ports:
+    - { name: http, port: 8090, targetPort: http }

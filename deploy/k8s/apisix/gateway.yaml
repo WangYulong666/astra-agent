@@ -1,0 +1,39 @@
+# APISIX 入口：Gateway API（基础路由）+ ApisixRoute（需要插件的路由）
+#
+# 为什么两种混用：
+#   Gateway API 的 HTTPRoute 表达不了 APISIX 插件（关 buffering、限流），
+#   而 SSE 路由恰恰必须要 proxy-control 关缓冲，否则事件流会被 Nginx 攒着不发。
+#   ⇒ 普通 REST 走 HTTPRoute，SSE / WebSocket 走 ApisixRoute。
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: apisix
+spec:
+  controllerName: apisix.apache.org/apisix-ingress-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: astra-gw
+  namespace: astra-system
+spec:
+  gatewayClassName: apisix
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: astra-tls
+      # 生产必须有 TLS：JWT 与租户令牌都在这条链路上
+  addresses:
+    - type: IPAddress
+      # MetalLB 从地址池里分配的 VIP，实际值由 MetalLB 的 IPAddressPool 决定。
+      # 192.0.2.10 是 RFC 5737 保留的文档示例地址（TEST-NET-1），**不是可用地址**，
+      # 部署时必须换成自己集群网段里未被 DHCP 占用的 VIP。
+      value: 192.0.2.10

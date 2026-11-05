@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- viewport-fit=cover 让 env(safe-area-inset-*) 有值（刘海屏 / 底部横条）。
+         不写 user-scalable=no：禁掉缩放等于对看不清的人关门。
+         interactive-widget=resizes-content 让安卓 Chrome 在键盘弹出时收缩布局视口，
+         输入区会跟着抬起来，而不是被键盘盖住。 -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#08090c" />
+    <meta name="description" content="Astra 工作台：在手机上看 agent 在沙箱里干活。" />
+
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Astra" />
+    <!-- black-translucent：内容顶到状态栏下面，靠 CSS 的 safe-area 留白补回来 -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%235b8cff'/%3E%3Cstop offset='1' stop-color='%238b6bff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='9' fill='url(%23g)'/%3E%3Cpath d='M10 22V10l12 12V10' fill='none' stroke='%23fff' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
+    />
+    <title>Astra · Agent 工作台</title>
+    <script type="module" crossorigin src="/assets/index-C_1EweIE.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-cf_5aKmy.css">
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // 只有在浏览器确实会接受 SW 的环境里才注册：
+      // - 内网 http:// 下 register() 会直接抛错，每次刷新刷满控制台；
+      // - 桌面端（Wails）加载的是 http://wails.localhost，hostname 既不是
+      //   localhost 也不是 127.0.0.1，于是自然被排除，不会去碰 SW。
+      ;(function () {
+        if (!('serviceWorker' in navigator)) return
+        var h = location.hostname
+        var secure =
+          location.protocol === 'https:' || h === 'localhost' || h === '127.0.0.1'
+        if (!secure) return
+        window.addEventListener('load', function () {
+          navigator.serviceWorker.register('/sw.js').catch(function () {
+            /* 注册失败不影响使用，静态资源本来也能直接从网络拿 */
+          })
+        })
+      })()
+    </script>
+  </body>
+</html>

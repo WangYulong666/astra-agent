@@ -1,0 +1,2294 @@
+# astra-agent 对外 HTTP 契约（OpenAPI 3.1）。
+#
+# 为什么这份文件在这里而不是 docs/：Go 的 //go:embed 不能引用父目录，
+# 契约必须在 internal/api/ 下才能被编进二进制；只放一份才不会漂移。
+# docs/openapi.yaml 只是指向本文件的说明页。
+#
+# 为什么手写而不是代码生成：oapi-codegen 会把现有 handler 全部重写，
+# 风险大于收益（见 docs/平台化设计-认证与治理.md D6）。
+#
+# 写作约束（解析器只看这个子集，见 openapi.go 的 parseYAMLSubset）：
+#   1. 只用块状 mapping / sequence，缩进 2 空格；
+#   2. 注释只能整行，行尾不要写注释（解析器不剥尾注释）；
+#   3. 流式写法只允许 [] / [a, b] / {}，不要写 {k: v}；
+#   4. 值里出现 "{…}" 或以数字/布尔开头的字符串必须加引号，否则会被当成别的类型。
+openapi: "3.1.0"
+
+info:
+  title: "astra-agent API"
+  version: "1.0.0"
+  description: "astra-agent 控制面：会话与事件流（运行时）、租户与用量（治理）、LLM 网关。"
+
+servers:
+  - url: "/"
+    description: "同源部署。反向代理会把 /v1/* 原样转给控制面。"
+
+tags:
+  - name: Health
+    description: "存活、就绪、指标。运维探针用，不需要凭据。"
+  - name: Auth
+    description: "初始化、登录、退出、当前身份、改自己的密码。"
+  - name: Setup
+    description: "首启向导。无需凭据可达，但只服务「一个租户都没有」的空系统。"
+  - name: Sessions
+    description: "会话及其工作区文件。一个会话绑定一个沙箱。"
+  - name: Runs
+    description: "一次 prompt 执行及其事件流。"
+  - name: Approvals
+    description: "人工审批。agent 越界执行前必须有人点头。"
+  - name: Sandboxes
+    description: "沙箱管理面。强杀只销毁运行环境，不删会话数据。"
+  - name: Usage
+    description: "用量与计费。计费的唯一可信来源是 LLM 网关的记账。"
+  - name: Admin
+    description: "租户 / 用户 / 凭据 / 审计 / 全租户用量。"
+  - name: LLM
+    description: "虚拟 key 签发与 OpenAI 兼容透传。"
+  - name: Meta
+    description: "运行信息与契约本身。"
+
+# 全局默认：JWT 或 API Key 二选一。公开接口在各自的操作上写 security: [] 覆盖。
+security:
+  - bearerAuth: []
+  - apiKeyAuth: []
+
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      summary: "存活探针：进程还活着就返回 200。"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "固定返回 ok，不检查任何依赖。"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+
+  /readyz:
+    get:
+      operationId: readyz
+      summary: "就绪探针：真的去戳 store 与治理层存储，不可用回 503。"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "依赖全部可用。"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  checks:
+                    type: object
+                    additionalProperties:
+                      type: string
+        "503":
+          description: "有依赖不可用，failed 里列出是谁。"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "not_ready"
+                  failed:
+                    type: array
+                    items:
+                      type: string
+                  checks:
+                    type: object
+                    additionalProperties:
+                      type: string
+
+  /metrics:
+    get:
+      operationId: get_metrics
+      summary: "Prometheus 文本指标；未启用指标时回 501。"
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: "Prometheus exposition 文本。"
+          content:
+            text/plain:
+              schema:
+                type: string
+        "501":
+          description: "指标未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/auth/bootstrap:
+    post:
+      operationId: bootstrap
+      summary: "首次初始化：建租户 + owner；系统里已有租户则 409。"
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BootstrapRequest'
+      responses:
+        "201":
+          description: "初始化完成。"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenant:
+                    $ref: '#/components/schemas/Tenant'
+                  user:
+                    $ref: '#/components/schemas/User'
+        "400":
+          description: "参数不合法。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "409":
+          description: "系统已初始化，或 slug / 邮箱被占用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/auth/login:
+    post:
+      operationId: login
+      summary: "邮箱密码换 JWT；失败文案统一，不做账号枚举。"
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        "200":
+          description: "登录成功。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        "401":
+          description: "租户、邮箱或密码不正确。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/auth/logout:
+    post:
+      operationId: logout
+      summary: "记一条审计后返回 204；JWT 无状态，不做吊销。"
+      tags: [Auth]
+      responses:
+        "204":
+          description: "已退出（仅审计，token 仍在有效期内可用）。"
+
+  /v1/auth/me:
+    get:
+      operationId: get_me
+      summary: "当前身份；前端刷新页面第一件事就是调它。"
+      tags: [Auth]
+      responses:
+        "200":
+          description: "principal 一定有；兼容模式下没有真实用户，所以 user 可能缺省。"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  principal:
+                    $ref: '#/components/schemas/Principal'
+                  user:
+                    $ref: '#/components/schemas/User'
+        "401":
+          description: "未登录。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/auth/password:
+    patch:
+      operationId: change_password
+      summary: "改自己的密码，必须先验旧密码。"
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+      responses:
+        "204":
+          description: "已修改。改密码前签发的 access / refresh 一并失效。"
+        "401":
+          description: "原密码不正确。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/auth/refresh:
+    post:
+      operationId: refresh
+      summary: "用 refresh token 换一对新 token（滚动续期）。"
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        "200":
+          description: "签发成功，旧 refresh 在其有效期内仍可用（不维护吊销表）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        "400":
+          description: "缺 refreshToken。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "401":
+          description: "刷新凭据无效或已过期（含 access 冒充、改密码后旧票）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/auth/sse-ticket:
+    post:
+      operationId: create_sse_ticket
+      summary: "签发 60 秒一次性 SSE 票据（jti 用后即焚），供 EventSource 以 ?ticket= 连接事件流。"
+      tags: [Auth]
+      responses:
+        "200":
+          description: "签发成功。票据只能用于 GET /v1/runs/{id}/events?ticket=，且只能用一次。"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ticket, expiresAt]
+                properties:
+                  ticket:
+                    type: string
+                  expiresAt:
+                    type: string
+                    format: date-time
+        "400":
+          description: "兼容模式下没有用户身份。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "401":
+          description: "未登录。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/setup/state:
+    get:
+      operationId: get_setup_state
+      summary: "向导第一步：系统是否还没初始化。前端登录前据此决定展示向导还是登录框。"
+      tags: [Setup]
+      description: "公开可读：只暴露「有没有租户」这一个布尔和 agent 展示名，泄露面可控。"
+      security: []
+      responses:
+        "200":
+          description: "向导状态。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetupState'
+        "500":
+          description: "查询租户列表失败。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/setup/complete:
+    post:
+      operationId: complete_setup
+      summary: "向导收口：建租户 + 管理员，成功后直接签发登录 token。"
+      tags: [Setup]
+      description: "与 bootstrap 的差别：密码由用户当场指定，且成功后顺手返回 token，免去再手输一遍。仅当系统里没有租户时可用。"
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetupCompleteRequest'
+      responses:
+        "201":
+          description: "初始化完成。autoLogin=false 表示账号已建好但自动登录失败，需去登录页手输密码。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SetupCompleteResponse'
+        "400":
+          description: "缺 email，或 password 不足 8 位。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "409":
+          description: "系统已初始化，或 slug / email 被占用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "412":
+          description: "当前存储后端不支持初始化向导。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/meta:
+    get:
+      operationId: get_meta
+      summary: "运行信息（provider / agent / 当前身份摘要），供前端决定要不要显示登录页。"
+      tags: [Meta]
+      responses:
+        "200":
+          description: "键值都是字符串，字段随装配而变。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Meta'
+
+  /v1/sessions:
+    get:
+      operationId: list_sessions
+      summary: "列出会话；结果按租户与角色过滤。"
+      tags: [Sessions]
+      responses:
+        "200":
+          description: "始终是数组，没有会话时返回空数组而不是 null。"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Session'
+    post:
+      operationId: create_session
+      summary: "建会话（同时拉起沙箱）；请求体可以为空。"
+      tags: [Sessions]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionRequest'
+      responses:
+        "201":
+          description: "会话已创建。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+
+  /v1/sessions/{id}:
+    get:
+      operationId: get_session
+      summary: "按 id 查会话；不属于自己时回 404 而不是 403。"
+      tags: [Sessions]
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        "200":
+          description: "会话。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        "404":
+          description: "不存在或无权访问。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      operationId: update_session
+      summary: "只改标题；其它字段是服务端与沙箱的事实。"
+      tags: [Sessions]
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSessionRequest'
+      responses:
+        "200":
+          description: "改后的会话。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        "400":
+          description: "标题为空。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      operationId: delete_session
+      summary: "删会话：销毁沙箱并删除数据，不可逆。"
+      tags: [Sessions]
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        "204":
+          description: "已删除。"
+        "404":
+          description: "不存在或无权访问。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/sessions/{id}/files:
+    get:
+      operationId: list_session_files
+      summary: "列工作区目录；目录在前，按名字排序。"
+      tags: [Sessions]
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - name: path
+          in: query
+          description: "相对工作区根目录的路径，空表示根。"
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "目录内容。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileListing'
+        "403":
+          description: "路径越出工作区。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "501":
+          description: "当前沙箱 provider 不支持从宿主读文件。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/sessions/{id}/file:
+    get:
+      operationId: read_session_file
+      summary: "预览工作区里的单个文件，超过 512KB 截断。"
+      tags: [Sessions]
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - name: path
+          in: query
+          description: "相对工作区根目录的路径，必填。"
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "文件内容；二进制文件只回元信息。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileContent'
+        "400":
+          description: "path 为空，或目标是目录。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "403":
+          description: "路径越出工作区。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # 下载是独立端点，不是 /file 的别名：/file 回 JSON 且二进制不返内容、超 512KB
+  # 截断，用它落盘会得到一个坏文件。这里返回原始字节，浏览器可直接存盘/分享。
+  /v1/sessions/{id}/download:
+    get:
+      operationId: download_session_file
+      summary: "下载工作区文件的原始字节（带 Content-Disposition，支持 Range）。"
+      tags: [Sessions]
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - name: path
+          in: query
+          description: "相对工作区根目录的路径，必填。"
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "文件原始字节；Content-Length 为真实大小。"
+          headers:
+            Content-Disposition:
+              description: "attachment; filename*=UTF-8''…，中文名走 RFC 5987。"
+              schema:
+                type: string
+            Content-Length:
+              description: "字节数，客户端据此算下载进度。"
+              schema:
+                type: integer
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "206":
+          description: "Range 命中，回 Content-Range 指定的片段。"
+        "400":
+          description: "path 为空，或目标是目录。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "403":
+          description: "路径越出工作区。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "404":
+          description: "文件不存在。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/sessions/{id}/runs:
+    post:
+      operationId: create_run
+      summary: "在会话里起一次 run（扣额度、归属校验都在起 run 之前）。"
+      tags: [Runs]
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRunRequest'
+      responses:
+        "201":
+          description: "run 已排队。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        "400":
+          description: "input 为空或请求体不是合法 JSON。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    get:
+      operationId: list_session_runs
+      summary: "列出会话下的全部 run。"
+      tags: [Runs]
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        "200":
+          description: "run 数组，没有时为空数组。"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Run'
+
+  /v1/runs/{id}:
+    get:
+      operationId: get_run
+      summary: "按 id 查 run；归属按其所属会话判定。"
+      tags: [Runs]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        "200":
+          description: "run。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Run'
+        "404":
+          description: "不存在或无权访问。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/runs/{id}/cancel:
+    post:
+      operationId: cancel_run
+      summary: "取消 run；已结束的 run 返回 202 但不做事。"
+      tags: [Runs]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        "202":
+          description: "取消意图已记录。"
+        "404":
+          description: "run 不存在。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/runs/{id}/events:
+    get:
+      operationId: stream_run_events
+      summary: "SSE 事件流：先订阅、再回放 after_seq 之后的历史，run 到终态即关闭。"
+      tags: [Runs]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - name: after_seq
+          in: query
+          description: "只推 seq 大于该值的事件；0 表示从头。"
+          required: false
+          schema:
+            type: integer
+            format: int64
+        - name: Last-Event-ID
+          in: header
+          description: "浏览器断线重连时自动带，等价于 after_seq。"
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "事件流。每帧形如 id / event / data（data 是 Event 的 payload）。"
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "404":
+          description: "run 不存在或无权访问。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/runs/{id}/history:
+    get:
+      operationId: get_run_history
+      summary: "事件历史的 JSON 版本，供首屏补历史。"
+      tags: [Runs]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - name: after_seq
+          in: query
+          description: "只返回 seq 大于该值的事件。"
+          required: false
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: "按 seq 升序的事件数组。"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Event'
+
+  /v1/runs/{id}/approvals:
+    get:
+      operationId: list_approvals
+      summary: "列出该 run 正在等人的审批。"
+      tags: [Approvals]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        "200":
+          description: "待审批列表，没有时为空数组。"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Approval'
+
+  /v1/runs/{id}/approvals/{toolCallId}:
+    post:
+      operationId: resolve_approval
+      summary: "提交审批结论（allow / deny），并落一条审计。"
+      tags: [Approvals]
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - name: toolCallId
+          in: path
+          description: "ACP 工具调用 id。"
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalDecisionRequest'
+      responses:
+        "200":
+          description: "结论已投递给等待中的 agent。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalResult'
+        "404":
+          description: "没有这条待审批（已处理、已超时或 run 已结束）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "409":
+          description: "重复提交。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/sandboxes:
+    get:
+      operationId: list_sandboxes
+      summary: "列出沙箱并附上反查出来的会话归属；无归属的残留不展示给普通租户。"
+      tags: [Sandboxes]
+      responses:
+        "200":
+          description: "沙箱数组。"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Sandbox'
+        "501":
+          description: "治理接口或 provider 未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/admin/lifecycle:
+    get:
+      operationId: get_lifecycle_status
+      summary: "沙箱回收器的当前策略与上一次清扫报告；未启用回 501。"
+      tags: [Sandboxes]
+      description: "策略与报告一起回：运维看到「沙箱没被回收」时，先确认回收有没有开、阈值是多少。"
+      responses:
+        "200":
+          description: "当前策略。lastSweep 为 null 表示进程起来后还没扫过。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LifecycleStatusView'
+        "501":
+          description: "沙箱回收未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/admin/lifecycle/sweep:
+    post:
+      operationId: sweep_lifecycle
+      summary: "同步跑一轮沙箱回收并返回报告；与后台循环互斥，不会重复销毁。"
+      tags: [Sandboxes]
+      responses:
+        "200":
+          description: "清扫完成。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LifecycleReportView'
+        "500":
+          description: "整轮无法进行（枚举失败）；error 带原因，report 是已扫到的部分。"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: string
+                  report:
+                    $ref: '#/components/schemas/LifecycleReportView'
+        "501":
+          description: "沙箱回收未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/sandboxes/{id}:
+    delete:
+      operationId: delete_sandbox
+      summary: "强杀沙箱；只销毁运行环境，会话与历史记录保留。"
+      tags: [Sandboxes]
+      parameters:
+        - name: id
+          in: path
+          description: "沙箱 id（当前与会话 id 相同）。"
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: "已销毁。"
+        "404":
+          description: "不存在或无权访问。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "501":
+          description: "治理接口或 provider 未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/usage:
+    get:
+      operationId: list_usage
+      summary: "租户内用量明细 + 汇总；member 只能看到自己的。"
+      tags: [Usage]
+      parameters:
+        - $ref: '#/components/parameters/FromTime'
+        - $ref: '#/components/parameters/ToTime'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        "200":
+          description: "明细与汇总一起返回，避免前端两次请求之间数字对不上。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageReport'
+        "400":
+          description: "时间参数格式不对。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/usage/billing:
+    get:
+      operationId: get_billing
+      summary: "本月额度、已用量与超限标记。"
+      tags: [Usage]
+      responses:
+        "200":
+          description: "计费视图，金额单位是美元。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Billing'
+        "501":
+          description: "治理接口未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/admin/tenants:
+    get:
+      operationId: list_tenants
+      summary: "列出租户；owner 只能看到自己的租户。"
+      tags: [Admin]
+      responses:
+        "200":
+          description: "租户数组。"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Tenant'
+    post:
+      operationId: create_tenant
+      summary: "建租户。"
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTenantRequest'
+      responses:
+        "201":
+          description: "已创建。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        "409":
+          description: "slug 已被占用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/admin/tenants/{id}:
+    get:
+      operationId: get_tenant
+      summary: "按 id 查租户。"
+      tags: [Admin]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        "200":
+          description: "租户。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+        "404":
+          description: "不是本租户。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      operationId: update_tenant
+      summary: "改名称 / 状态 / 额度；slug 不允许改。"
+      tags: [Admin]
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTenantRequest'
+      responses:
+        "200":
+          description: "改后的租户。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Tenant'
+
+  /v1/admin/users:
+    get:
+      operationId: list_users
+      summary: "列出本租户用户。"
+      tags: [Admin]
+      responses:
+        "200":
+          description: "用户数组，永不含密码哈希。"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+    post:
+      operationId: create_user
+      summary: "建用户；不填密码时由系统生成，明文只在本次响应出现一次。"
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+      responses:
+        "201":
+          description: "已创建。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateUserResponse'
+        "403":
+          description: "非 owner 想创建 owner。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "409":
+          description: "邮箱在本租户下已存在。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/admin/users/{id}:
+    patch:
+      operationId: update_user
+      summary: "改角色 / 状态 / 显示名 / 重置密码；不能动掉最后一个 owner。"
+      tags: [Admin]
+      parameters:
+        - name: id
+          in: path
+          description: "用户 id。"
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserRequest'
+      responses:
+        "200":
+          description: "改后的用户。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        "409":
+          description: "会改掉租户最后一个 owner。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/admin/apikeys:
+    get:
+      operationId: list_apikeys
+      summary: "列出凭据；只回前缀，不回明文。"
+      tags: [Admin]
+      responses:
+        "200":
+          description: "凭据数组。"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/APIKey'
+    post:
+      operationId: create_apikey
+      summary: "签发凭据；明文只在这一个响应里出现一次。"
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAPIKeyRequest'
+      responses:
+        "201":
+          description: "已签发。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateAPIKeyResponse'
+        "400":
+          description: "name 为空或缺 userId。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/admin/apikeys/{id}:
+    delete:
+      operationId: revoke_apikey
+      summary: "撤销凭据；tenantID 一起下推到存储层，避免先查后撤的 TOCTOU 窗口。"
+      tags: [Admin]
+      parameters:
+        - name: id
+          in: path
+          description: "凭据 id。"
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: "已撤销。"
+        "404":
+          description: "不存在或不属于本租户。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/admin/audit:
+    get:
+      operationId: list_audit
+      summary: "查审计日志，按时间倒序。"
+      tags: [Admin]
+      parameters:
+        - name: action
+          in: query
+          description: "动作名，如 session.create。"
+          required: false
+          schema:
+            type: string
+        - $ref: '#/components/parameters/FromTime'
+        - $ref: '#/components/parameters/ToTime'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        "200":
+          description: "审计数组。"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuditLog'
+
+  /v1/admin/usage:
+    get:
+      operationId: admin_list_usage
+      summary: "管理员视角的用量查询，可用 userId 精确到人（限本租户）。"
+      tags: [Admin]
+      parameters:
+        - name: userId
+          in: query
+          description: "只看某个用户；留空表示全租户。"
+          required: false
+          schema:
+            type: string
+        - $ref: '#/components/parameters/FromTime'
+        - $ref: '#/components/parameters/ToTime'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        "200":
+          description: "明细与汇总。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsageReport'
+
+  /v1/admin/llm-settings:
+    get:
+      operationId: get_llm_settings
+      summary: "查看上游凭据状态。永不回 key 本体，只回有没有。"
+      tags: [Admin]
+      responses:
+        "200":
+          description: "网关未启用时只回 gateway=false。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LLMSettingsView'
+    post:
+      operationId: update_llm_settings
+      summary: "热更上游 key / baseURL 并持久化；apiKey 传空串表示清除。"
+      tags: [Admin]
+      description: "后端不拦「清空 key」：排障时把 key 摘掉看报错变化是合法操作。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateLLMSettingsRequest'
+      responses:
+        "200":
+          description: "更新后的状态。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LLMSettingsView'
+        "412":
+          description: "LLM 网关未启用（启动时未开 llm-gateway）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/admin/llm-settings/test:
+    post:
+      operationId: test_llm_settings
+      summary: "用给定的 key/baseUrl 真连一次上游（max_tokens=1），验证凭据可用。"
+      tags: [Admin]
+      description: "不带 key 时测当前已配置的——用于「系统里存的那把还好使吗」。连通与否都是 200，结果用 ok 表达。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LLMSettingsTestRequest'
+      responses:
+        "200":
+          description: "探测结果。ok=false 时 error 带面向人的原因。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LLMSettingsTestResult'
+        "400":
+          description: "没有给定 key 且系统里也没存 key。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/sessions/{id}/llm-token:
+    post:
+      operationId: issue_llm_token
+      summary: "为会话签发短期虚拟 key；真 key 不进沙箱。"
+      tags: [LLM]
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        "200":
+          description: "虚拟 key 与过期时间。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LLMToken'
+        "501":
+          description: "网关未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/llm/{path}:
+    post:
+      operationId: llm_proxy
+      summary: "OpenAI 兼容透传（含流式），并按实际 token 记账。"
+      tags: [LLM]
+      description: "代码里注册的是 POST /v1/llm/{path...}（任意子路径），契约用单段 {path} 表达。"
+      parameters:
+        - name: path
+          in: path
+          description: "上游子路径，如 v1/chat/completions。"
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: "上游响应原样透传，流式时为 text/event-stream。"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          description: "虚拟 key 无效或过期。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "501":
+          description: "网关未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    get:
+      operationId: llm_proxy_get
+      summary: "GET 透传：agent 的 SDK 会先探 /v1/models 再发消息，只注册 POST 会表现成「模型列表是空的」。"
+      tags: [LLM]
+      description: "同 POST 的透传与记账路径，仅方法不同。"
+      parameters:
+        - name: path
+          in: path
+          description: "上游子路径，如 v1/models。"
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "上游响应原样透传。"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          description: "虚拟 key 无效或过期。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "501":
+          description: "网关未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      operationId: llm_proxy_delete
+      summary: "DELETE 透传：Files API 的清理，原样转发即可，不需要单独逻辑。"
+      tags: [LLM]
+      parameters:
+        - name: path
+          in: path
+          description: "上游子路径。"
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "上游响应原样透传。"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          description: "虚拟 key 无效或过期。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "501":
+          description: "网关未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/openapi.json:
+    get:
+      operationId: get_openapi
+      summary: "契约导出（本文件解析后的 JSON）。"
+      tags: [Meta]
+      description: "路由注册为公开：/docs 页面在浏览器里直接拉它，不该被登录态挡住。"
+      security: []
+      responses:
+        "200":
+          description: "OpenAPI 文档。"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "500":
+          description: "内嵌的 YAML 解析失败（构建期的错，不是请求的错）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /docs:
+    get:
+      operationId: get_docs
+      summary: "自包含的契约浏览页（不依赖外部 CDN）。"
+      tags: [Meta]
+      security: []
+      responses:
+        "200":
+          description: "HTML 页面，数据来自 /v1/openapi.json。"
+          content:
+            text/html:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "登录拿到的人用 JWT（HS256，默认 24h）。"
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: "机器用长期凭据，形如 astra_sk_xxx；也可以放在 Authorization: Bearer 里。"
+
+  parameters:
+    SessionId:
+      name: id
+      in: path
+      description: "会话 id（26 字符）。"
+      required: true
+      schema:
+        type: string
+    RunId:
+      name: id
+      in: path
+      description: "run id（26 字符）。"
+      required: true
+      schema:
+        type: string
+    TenantId:
+      name: id
+      in: path
+      description: "租户 id。"
+      required: true
+      schema:
+        type: string
+    FromTime:
+      name: from
+      in: query
+      description: "起始时间，RFC3339 或 2006-01-02（按 UTC 当天 0 点解释）。"
+      required: false
+      schema:
+        type: string
+    ToTime:
+      name: to
+      in: query
+      description: "结束时间，格式同 from。"
+      required: false
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      description: "返回条数上限；非法值退回默认值而不是报错。"
+      required: false
+      schema:
+        type: integer
+
+  schemas:
+    Error:
+      type: object
+      description: "所有失败响应都是这个形状；fail() 只写 error 一个字段。"
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: "面向人的错误文案，不是机器码。"
+          example: "会话不存在"
+
+    Principal:
+      type: object
+      description: "一次请求的身份。所有 handler 的 tenantId 都从这里取。"
+      properties:
+        userId:
+          type: string
+        tenantId:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+          enum: [owner, admin, member]
+        via:
+          type: string
+          description: "凭据来源：jwt / apikey / dev（单机兼容模式）。"
+          enum: [jwt, apikey, dev]
+        keyId:
+          type: string
+          description: "via=apikey 时有值。"
+
+    Session:
+      type: object
+      description: "会话。1 会话 = 1 沙箱 = 1 个 agent 进程。"
+      required: [id, sandboxId, agentSessionId, cwd, status]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+          description: "归属租户；单租户兼容模式下为空。"
+        userId:
+          type: string
+        sandboxId:
+          type: string
+          description: "当前与 id 相同（不做复用池），单独留字段以便以后能换。"
+        agentSessionId:
+          type: string
+          description: "ACP 的 sessionId，与平台会话 id 不是一回事。"
+        title:
+          type: string
+        cwd:
+          type: string
+        status:
+          type: string
+          enum: [active, idle, deleted]
+        createdAt:
+          type: string
+          format: date-time
+        lastActiveAt:
+          type: string
+          format: date-time
+
+    Run:
+      type: object
+      description: "一次 prompt 执行，也是事件流的归属单位。"
+      required: [id, sessionId, status, input, nextSeq]
+      properties:
+        id:
+          type: string
+        sessionId:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, waiting_approval, completed, failed, cancelled]
+        input:
+          type: string
+        stopReason:
+          type: string
+        error:
+          type: string
+        nextSeq:
+          type: integer
+          format: int64
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+        endedAt:
+          type: string
+          format: date-time
+
+    Event:
+      type: object
+      description: "一条已落库的事件。seq 在 run 内单调连续，从 1 开始。"
+      required: [seq, type]
+      properties:
+        seq:
+          type: integer
+          format: int64
+        type:
+          type: string
+          description: "message_delta / thought_delta / tool_call_start / tool_call_update / approval_req / approval_result / agent_log / error / run_state"
+          enum: [message_delta, thought_delta, tool_call_start, tool_call_update, approval_req, approval_result, agent_log, error, run_state]
+        payload:
+          description: "事件体，形状随 type 而定。"
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+
+    Approval:
+      type: object
+      description: "一条挂在人面前的审批请求。"
+      required: [runId, toolCallId]
+      properties:
+        runId:
+          type: string
+        toolCallId:
+          type: string
+        title:
+          type: string
+        kind:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+          description: "到点自动按拒绝处理，避免把 run 与沙箱锁一起吊死。"
+
+    ApprovalDecisionRequest:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [allow, deny]
+
+    ApprovalResult:
+      type: object
+      description: "审批回执。事件流里的 approval_result 是另一条记录。"
+      properties:
+        runId:
+          type: string
+        toolCallId:
+          type: string
+        decision:
+          type: string
+          enum: [allow, deny, timeout]
+
+    Meta:
+      type: object
+      description: "运行信息。键值都是字符串，字段随装配而变（provider / agent / policy / requireAuth / tenantId / email / role）。"
+      additionalProperties:
+        type: string
+
+    Tenant:
+      type: object
+      required: [id, name, slug, status]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        slug:
+          type: string
+          description: "登录用短名，全局唯一，创建后不可改。"
+        status:
+          type: string
+          enum: [active, suspended]
+        monthlyTokenLimit:
+          type: integer
+          format: int64
+          description: "每月 token 上限，0 表示不限。"
+        createdAt:
+          type: string
+          format: date-time
+
+    User:
+      type: object
+      description: "用户。邮箱在租户内唯一，密码哈希永远不出 API。"
+      required: [id, tenantId, email, role, status]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        email:
+          type: string
+        displayName:
+          type: string
+        role:
+          type: string
+          enum: [owner, admin, member]
+        status:
+          type: string
+          enum: [active, suspended]
+        createdAt:
+          type: string
+          format: date-time
+        lastLoginAt:
+          type: string
+          format: date-time
+
+    APIKey:
+      type: object
+      description: "长期凭据。库里只有 sha256(明文)，所以只有 prefix 可展示。"
+      required: [id, tenantId, userId, name, prefix]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        userId:
+          type: string
+        name:
+          type: string
+        prefix:
+          type: string
+          description: "形如 astra_sk_a1b2c3，够用户认出是哪把钥匙。"
+        createdAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        revokedAt:
+          type: string
+          format: date-time
+
+    Usage:
+      type: object
+      description: "一次模型调用的用量。source=gateway 才参与计费。"
+      required: [id, tenantId, provider, model, inputTokens, outputTokens, costMicroUsd, source]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        userId:
+          type: string
+        sessionId:
+          type: string
+        runId:
+          type: string
+        provider:
+          type: string
+          description: "deepseek / openai / ..."
+        model:
+          type: string
+        inputTokens:
+          type: integer
+          format: int64
+        outputTokens:
+          type: integer
+          format: int64
+        costMicroUsd:
+          type: integer
+          format: int64
+          description: "微美元（1e-6 USD）整数存储，避免浮点累加误差。"
+        source:
+          type: string
+          enum: [gateway, agent]
+        createdAt:
+          type: string
+          format: date-time
+
+    UsageSum:
+      type: object
+      required: [inputTokens, outputTokens, costMicroUsd, calls]
+      properties:
+        inputTokens:
+          type: integer
+          format: int64
+        outputTokens:
+          type: integer
+          format: int64
+        costMicroUsd:
+          type: integer
+          format: int64
+        calls:
+          type: integer
+          format: int64
+
+    UsageReport:
+      type: object
+      description: "明细 + 汇总一起回：前端要同时画列表和顶部数字。"
+      required: [items, sum]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Usage'
+        sum:
+          $ref: '#/components/schemas/UsageSum'
+
+    Billing:
+      type: object
+      description: "本月计费视图。金额从微美元换算成美元只在展示层做一次。"
+      required: [inputTokens, outputTokens, costUsd, calls, monthlyTokenLimit, usedPercent, overLimit]
+      properties:
+        inputTokens:
+          type: integer
+          format: int64
+        outputTokens:
+          type: integer
+          format: int64
+        costUsd:
+          type: number
+          description: "美元，保留 4 位小数。"
+        calls:
+          type: integer
+          format: int64
+        monthlyTokenLimit:
+          type: integer
+          format: int64
+          description: "0 表示不限。"
+        usedPercent:
+          type: number
+          description: "已用百分比，保留 2 位小数；额度为 0 时是 0。"
+        overLimit:
+          type: boolean
+          description: "用满即视为超限（>= 而非 >）。"
+
+    AuditLog:
+      type: object
+      description: "只记「改变了状态或读了敏感数据」的动作，不记全量请求。"
+      required: [id, tenantId, action, targetType]
+      properties:
+        id:
+          type: string
+        tenantId:
+          type: string
+        userId:
+          type: string
+        actorEmail:
+          type: string
+        action:
+          type: string
+          example: "session.create"
+        targetType:
+          type: string
+          description: "session / user / apikey / sandbox / tenant / run"
+        targetId:
+          type: string
+        detail:
+          description: "动作相关的结构化细节。"
+          additionalProperties: true
+        ip:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    Sandbox:
+      type: object
+      description: "沙箱条目。刻意不含 Endpoint：里面有能直接连进沙箱的凭据。"
+      required: [id, provider, state]
+      properties:
+        id:
+          type: string
+        provider:
+          type: string
+        state:
+          type: string
+        workspace:
+          type: string
+        pid:
+          type: integer
+          description: "local provider 的 acp-proxy 进程号；其它 provider 为 0。"
+        createdAt:
+          type: string
+          format: date-time
+        sessionId:
+          type: string
+        sessionTitle:
+          type: string
+        tenantId:
+          type: string
+        userId:
+          type: string
+
+    FileEntry:
+      type: object
+      required: [name, path, isDir, size]
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+          description: "相对工作区的 URL 风格路径，始终用正斜杠。"
+        isDir:
+          type: boolean
+        size:
+          type: integer
+          format: int64
+        modTime:
+          type: string
+          format: date-time
+
+    FileListing:
+      type: object
+      required: [path, entries]
+      properties:
+        path:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/FileEntry'
+
+    FileContent:
+      type: object
+      description: "文件预览。二进制或超限时 content 为空。"
+      required: [path, size, truncated, binary]
+      properties:
+        path:
+          type: string
+        content:
+          type: string
+        size:
+          type: integer
+          format: int64
+        truncated:
+          type: boolean
+          description: "超过 512KB 时为真。"
+        binary:
+          type: boolean
+          description: "前 8KB 里有 NUL 即判为二进制。"
+
+    LoginRequest:
+      type: object
+      required: [tenant, email, password]
+      properties:
+        tenant:
+          type: string
+          description: "租户 slug，大小写不敏感。"
+        email:
+          type: string
+        password:
+          type: string
+          format: password
+
+    LoginResponse:
+      type: object
+      required: [token, expiresAt, user, tenant]
+      properties:
+        token:
+          type: string
+          description: "JWT，放进 Authorization: Bearer。"
+        expiresAt:
+          type: string
+          format: date-time
+        refreshToken:
+          type: string
+          description: "30 天，typ=refresh，只能用于 /v1/auth/refresh。缺省表示当前认证实现不支持刷新。"
+        refreshExpiresAt:
+          type: string
+          format: date-time
+        user:
+          $ref: '#/components/schemas/User'
+        tenant:
+          $ref: '#/components/schemas/Tenant'
+
+    RefreshRequest:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken:
+          type: string
+
+    TokenPair:
+      type: object
+      required: [token, expiresAt, refreshToken, refreshExpiresAt]
+      properties:
+        token:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        refreshToken:
+          type: string
+        refreshExpiresAt:
+          type: string
+          format: date-time
+
+    BootstrapRequest:
+      type: object
+      required: [tenantName, slug, email, password]
+      properties:
+        tenantName:
+          type: string
+        slug:
+          type: string
+          description: "小写字母、数字、连字符，3~32 位。"
+        email:
+          type: string
+        password:
+          type: string
+          format: password
+
+    ChangePasswordRequest:
+      type: object
+      required: [oldPassword, newPassword]
+      properties:
+        oldPassword:
+          type: string
+          format: password
+        newPassword:
+          type: string
+          format: password
+          description: "至少 8 位。"
+
+    SetupState:
+      type: object
+      description: "向导状态。llmGateway / llmConfigured 反映启动时是否开了网关、有没有可用 key。"
+      required: [needsSetup, llmGateway, llmConfigured]
+      properties:
+        agentName:
+          type: string
+        approval:
+          type: string
+        needsSetup:
+          type: boolean
+          description: "系统里一个租户都没有时为 true。"
+        llmGateway:
+          type: boolean
+        llmConfigured:
+          type: boolean
+          description: "网关开着且存了 key。"
+
+    SetupCompleteRequest:
+      type: object
+      required: [email, password]
+      properties:
+        slug:
+          type: string
+          description: "租户短名；留空用 default。"
+        name:
+          type: string
+          description: "租户显示名；留空用「默认租户」。"
+        email:
+          type: string
+        password:
+          type: string
+          format: password
+          description: "至少 8 位。"
+
+    SetupCompleteResponse:
+      type: object
+      description: "tenant / user 一定有；token 只在 autoLogin=true 时出现。"
+      required: [tenant, user, autoLogin]
+      properties:
+        tenant:
+          $ref: '#/components/schemas/Tenant'
+        user:
+          $ref: '#/components/schemas/User'
+        autoLogin:
+          type: boolean
+          description: "false 表示账号已建好但签发 token 失败，需去登录页手输密码。"
+        token:
+          type: string
+          description: "JWT，与 /v1/auth/login 返回的同形。"
+
+    LLMSettingsView:
+      type: object
+      description: "上游凭据状态。只回有没有 key，永不回 key 本体。"
+      required: [gateway]
+      properties:
+        gateway:
+          type: boolean
+          description: "启动时是否启用了 LLM 网关。"
+        hasKey:
+          type: boolean
+        baseUrl:
+          type: string
+
+    UpdateLLMSettingsRequest:
+      type: object
+      properties:
+        apiKey:
+          type: string
+          format: password
+          description: "空串表示清除已存的 key。"
+        baseUrl:
+          type: string
+
+    LLMSettingsTestRequest:
+      type: object
+      description: "两个字段都可选：不带 key 时测当前已配置的。"
+      properties:
+        apiKey:
+          type: string
+          format: password
+        baseUrl:
+          type: string
+          description: "留空用 DeepSeek 官方地址。"
+
+    LLMSettingsTestResult:
+      type: object
+      description: "无论连通与否都是 200，结果用 ok 表达。"
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        latencyMs:
+          type: integer
+          format: int64
+          description: "ok=true 时有值。"
+        error:
+          type: string
+          description: "ok=false 时的失败原因，面向人。"
+
+    LifecyclePolicyView:
+      type: object
+      description: "回收策略快照。时长同时给秒数（前端换算）与可读串（运维直读）。"
+      required: [sweepIntervalSeconds, idleTimeoutSeconds, maxAgeSeconds, maxPerTenant, sweepInterval, idleTimeout, maxAge, enabled]
+      properties:
+        sweepIntervalSeconds:
+          type: integer
+          format: int64
+        idleTimeoutSeconds:
+          type: integer
+          format: int64
+        maxAgeSeconds:
+          type: integer
+          format: int64
+        maxPerTenant:
+          type: integer
+        sweepInterval:
+          type: string
+          description: "0 显示 off 而不是 0s，避免被误读成「立刻超时」。"
+        idleTimeout:
+          type: string
+        maxAge:
+          type: string
+        enabled:
+          type: boolean
+          description: "false 时后台循环不启动、手动清扫也不销毁任何东西。"
+
+    LifecycleReportView:
+      type: object
+      description: "一轮清扫的结果。"
+      required: [scanned, destroyed, orphaned, expired, idle, kept, errors, startedAt, finishedAt]
+      properties:
+        scanned:
+          type: integer
+        destroyed:
+          type: integer
+        orphaned:
+          type: integer
+        expired:
+          type: integer
+        idle:
+          type: integer
+        kept:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: string
+          description: "没有错误时是空数组而不是 null。"
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+
+    LifecycleStatusView:
+      type: object
+      required: [policy]
+      properties:
+        policy:
+          $ref: '#/components/schemas/LifecyclePolicyView'
+        lastSweep:
+          $ref: '#/components/schemas/LifecycleReportView'
+          description: "进程起来后还没扫过时为 null；「扫了但什么都没找到」是全 0 报告，两者不是一回事。"
+
+    CreateSessionRequest:
+      type: object
+      properties:
+        cwd:
+          type: string
+          description: "留空用服务端默认目录（各沙箱自己的 workspace）。"
+
+    UpdateSessionRequest:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+          description: "超过 80 个字符会被截断；只有它可以改。"
+
+    CreateRunRequest:
+      type: object
+      required: [input]
+      properties:
+        input:
+          type: string
+
+    CreateTenantRequest:
+      type: object
+      required: [name, slug]
+      properties:
+        name:
+          type: string
+        slug:
+          type: string
+        monthlyTokenLimit:
+          type: integer
+          format: int64
+          description: "0 表示不限。"
+
+    UpdateTenantRequest:
+      type: object
+      description: "三个字段都是可选的；只传要改的那个。"
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, suspended]
+        monthlyTokenLimit:
+          type: integer
+          format: int64
+
+    CreateUserRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+        displayName:
+          type: string
+        role:
+          type: string
+          enum: [owner, admin, member]
+          description: "缺省 member（最小权限）。只有 owner 能创建 owner。"
+        password:
+          type: string
+          format: password
+          description: "留空则由系统生成。"
+
+    CreateUserResponse:
+      type: object
+      required: [user]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        initialPassword:
+          type: string
+          description: "仅当密码由系统生成时出现，且只出现这一次。"
+
+    UpdateUserRequest:
+      type: object
+      description: "四个字段都是可选的。"
+      properties:
+        displayName:
+          type: string
+        role:
+          type: string
+          enum: [owner, admin, member]
+        status:
+          type: string
+          enum: [active, suspended]
+        password:
+          type: string
+          format: password
+          description: "管理员重置密码；不回明文。"
+
+    CreateAPIKeyRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: "用于在列表里区分是哪把钥匙。"
+        userId:
+          type: string
+          description: "挂在谁名下；省略则挂在调用者自己名下，目标必须属于本租户。"
+        expiresInDays:
+          type: integer
+          description: "0 表示不过期。"
+
+    CreateAPIKeyResponse:
+      type: object
+      required: [key, plaintext]
+      properties:
+        key:
+          $ref: '#/components/schemas/APIKey'
+        plaintext:
+          type: string
+          description: "明文只在这一个响应里出现一次，之后任何接口都只能看到 prefix。"
+
+    LLMToken:
+      type: object
+      description: "短期虚拟 key，绑定 tenant/user/session，默认 2h。"
+      required: [token, expiresAt]
+      properties:
+        token:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        baseUrl:
+          type: string
+          description: "沙箱应使用的网关地址。"

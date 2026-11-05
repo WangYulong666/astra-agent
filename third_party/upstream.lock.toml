@@ -1,0 +1,146 @@
+# 上游依赖锁定表 —— 单一事实来源
+#
+# 规则：
+#   1. 任何「从上游拉代码」的动作都必须读这张表，脚本里**不允许**硬编码 URL 或版本
+#   2. 升级上游 = 只改这里的 commit，然后跑 scripts/sync-upstream.sh
+#   3. 每个 commit 都必须是完整 40 位 sha，不接受 branch / tag（branch 会漂移）
+#
+# 三种引入模式：
+#   submodule —— 完整源码以 git submodule 形式放在 third_party/<name>/
+#                升级：sh scripts/sync-upstream.sh update <name>
+#   sparse    —— 只拉 paths 里列的几个文件，写到 dest
+#                升级：同上，脚本按 commit 逐个下载并校验 sha256
+#   gomod     —— Go 依赖，版本由 go.mod / go.sum 锁定，源码不入库
+#                实际路径：模块代理（GOPROXY）下载到本地模块缓存 GOMODCACHE，
+#                go.sum 里的 h1: 摘要保证字节级可复现。
+#                升级：go get <pkg>@<ver> && go mod tidy
+#                注意：本仓库**不使用** vendor/ 目录。Go 依赖靠 go.mod + go.sum
+#                加模块代理复现，vendor/ 会让每次升级都在主仓库历史里留一份完整源码快照
+
+version = 1
+updated = "2026-10-28"
+
+# ─────────────────────────────────────────────────────────────
+# 沙箱底座
+# ─────────────────────────────────────────────────────────────
+[[source]]
+name        = "cubesandbox"
+mode        = "submodule"
+repo        = "https://github.com/TencentCloud/CubeSandbox.git"
+ref         = "master"
+commit      = "0fea4f8c365f8105a47ce2e0b2dc2cffd1ac363d"
+license     = "Apache-2.0"
+dest        = "third_party/cubesandbox"
+size_hint   = "57.8 MB (git objects)"
+purpose     = """
+沙箱底座（KVM microVM / RustVMM）。需要能读、能改、能在本地构建镜像，
+不能只依赖官方镜像——CubeEgress 的默认拒绝网段会覆盖 k8s pod/service CIDR，
+这个必须按我们的网络规划 patch。
+"""
+license_note = """
+LICENSE 文件 25,798 字节，主体为 Apache-2.0，另附第三方组件清单（3 项）：
+
+  1. kata-containers    → Apache-2.0（Tencent 声明有修改）
+  2. cloud-hypervisor   → Apache-2.0（Tencent 声明有修改）
+  3. cilium/bpf         → BSD-2-Clause OR GPL-2.0 双许可，
+                          Tencent 明确 "elected to use it under the terms of BSD-2-Clause"
+
+除根 LICENSE 外，源码树里另有 5 个独立许可文件（此前漏报，已逐个打开核实）：
+
+  4. hypervisor/LICENSE-APACHE                  Apache-2.0
+  5. hypervisor/LICENSE-BSD-3-Clause            BSD-3-Clause（Copyright 2017 The Chromium OS Authors）
+  6. hypervisor/virtiofsd/LICENSE-APACHE        Apache-2.0
+  7. hypervisor/virtiofsd/LICENSE-BSD-3-Clause  BSD-3-Clause（Copyright 2017 The Chromium OS Authors）
+  8. hypervisor/docs/COPYING.docs               CC-BY-4.0（Attribution 4.0 International）
+
+口径说明，避免误判：
+
+  · 第 1–7 项全部是 Apache-2.0 / BSD 系，无 copyleft，符合项目红线。
+  · 第 8 项 CC-BY-4.0 **不是 OSI 软件许可，是文档/内容许可**，确实在
+    「只认 Apache-2.0 / MIT / BSD」这条红线之外。但它的性质是「署名即合规」的
+    引用型许可：不要求衍生作品同样开源，无 copyleft 传染。我们不修改
+    hypervisor/docs/ 下的文档，因此也不触发 CC-BY 的「改编」条款，
+    只需保留署名——已在根 NOTICE 中列明。随源码原样分发是安全的。
+  · 所以「本仓库许可全是 Apache/MIT/BSD」这句话不成立。准确表述是：
+    代码许可全部为 Apache-2.0 / BSD 系，文档许可为 CC-BY-4.0（署名型、无传染）。
+GitHub 把本仓库标为 NOASSERTION，仅因为「混合许可 + 腾讯自定义前言」，不是许可有问题。
+"""
+
+# ─────────────────────────────────────────────────────────────
+# Agent 运行时
+# ─────────────────────────────────────────────────────────────
+[[source]]
+name        = "deepseek-harness"
+mode        = "sparse"
+repo        = "https://github.com/deepseek-ai/deepseek-harness.git"
+ref         = "master"
+commit      = "f3803c96974ad4a94195fb97e5c637e9c2a3afe3"
+license     = "MIT"
+dest        = "third_party/deepseek-harness"
+size_hint   = "整仓 317 MB；实际取 ACP 包 + core 引擎，约 2.7 MB / 300 个文件"
+purpose     = """
+沙箱内 agent 运行时，`dsh --profile acp` 启动。
+引入源码的目的不是构建（运行时用 dsh-trim/ 从 npm 装的裁剪版），而是：
+  · 审计——ACP 实现、权限模型、遥测行为必须可读
+  · 扩展——未来平台能力以 DSH 插件形式下沉，比只能走 MCP 更深入
+  · 对比——上游一改，能立刻 diff 出对 ACP 的影响
+取这三个子树，正好覆盖上面三条：
+  · packages/acp/    ACP 协议实现（含 request_permission 语义、能力声明）
+  · packages/core/   agent 引擎（agent-loop / session / tools / tool-executor）
+  · 根目录元数据      package.json / pnpm-workspace.yaml / THIRD_PARTY_NOTICES.md / SAFETY.md
+"""
+note = """
+为什么不是 tarball 全量快照（虽然脚本支持）：
+  整仓 317MB，本机链路对大文件持续限速（codeload 实测从 254KB/s 掉到 11KB/s），
+  单个 tarball 拉到一半必然超时；而 api.github.com 的小请求稳定 1 秒内返回。
+  所以改成「按需取子树」：约 300 次小请求，并发 8 路，1 分钟内落地。
+  ⇒ 需要全量时把 mode 改回 "tarball" 再 fetch，脚本无需改动。
+为什么不是 submodule：
+  git 协议拉这个仓库持续报 `RPC failed; curl 28 Operation too slow (<1000 bytes/sec)`。
+⚠️ 运行时**不要**用这份源码构建。版本以 dsh-trim/package.json 钉死的精确版本为准。
+⚠️ 上游仍是预发布（v0.2.1-rc.x），自称会有兼容性破坏。升级当独立任务做，别顺手 bump。
+"""
+paths = [
+  "package.json",
+  "pnpm-workspace.yaml",
+  "THIRD_PARTY_NOTICES.md",
+  "SAFETY.md",
+  "README.md",
+  "packages/acp/",
+  "packages/core/",
+]
+
+# ─────────────────────────────────────────────────────────────
+# envd 数据面协议
+# ─────────────────────────────────────────────────────────────
+[[source]]
+name        = "envd-proto"
+mode        = "sparse"
+repo        = "https://github.com/e2b-dev/runtime.git"
+ref         = "main"
+commit      = "518278060a154124a80d98f37253f8af77baf478"
+license     = "Apache-2.0"
+dest        = "third_party/envd-proto"
+size_hint   = "整个仓库 99 MB，实际只取 5 个 .proto（约 30 KB）"
+purpose     = """
+envd 数据面协议定义（Connect RPC / protobuf）。
+M0 阶段不走 envd 的 process RPC（改走 acp-proxy + WSS，见 ADR-0002），
+所以这里先锁定、备用：等要做文件上传、快照、模板构建时再生成 Go 代码。
+"""
+paths = [
+  "packages/envd/spec/filesystem/filesystem.proto",
+  "packages/envd/spec/process/process.proto",
+  "packages/envd/spec/upgrade/handover.proto",
+  "packages/envd/internal/services/legacy/legacyfilesystem.proto",
+  "packages/envd/internal/services/legacy/legacyprocess.proto",
+]
+note = """
+只要这 5 个文件，不要整仓。整仓 99MB 里有 firecracker、orchestrator、api 等我们完全不用的部分。
+"""
+
+# ─────────────────────────────────────────────────────────────
+# 尚未引入（记录决策，避免后来人重复调研）
+# ─────────────────────────────────────────────────────────────
+# apache/apisix            Apache-2.0  —— 走 helm chart 部署，不是代码依赖，不入 third_party
+# vbenjs/vue-vben-admin    MIT         —— 前端脚手架，M1 起单独仓或 monorepo 子包，届时再定
+# 各家 LLM SDK             —— 已从 dsh 镜像中裁掉（见 ADR-0004），不需要

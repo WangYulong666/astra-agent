@@ -1,0 +1,83 @@
+name: Bug 报告
+description: 出现报错、卡死、行为不符合预期
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先确认两件事，能省一轮来回：
+        1. 用 `make check` 跑过一遍了吗？（本地全绿再报，能排除掉大部分环境问题）
+        2. 在 [已有 issue](../../issues?q=is%3Aissue) 里搜过关键词了吗？
+
+  - type: dropdown
+    id: deploy
+    attributes:
+      label: 怎么跑的
+      options:
+        - 源码 `make serve`（macOS）
+        - 源码 `make serve`（Linux）
+        - macOS 桌面 App（.dmg）
+        - Android App
+        - k3s / k8s 部署
+        - 其他（在补充说明里写）
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: 沙箱 provider
+      options: ["local", "applecontainer", "cube", "不确定"]
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: tag 或 commit sha（`git rev-parse --short HEAD`）
+      placeholder: "0.2.0 / 580a6d5"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 期望什么、实际什么。有截图直接贴。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 新建会话
+        2. 发送「...」
+        3. 审批卡片点允许
+        4. 看到 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: |
+        服务端日志、浏览器 Console、`~/Library/Logs/Astra/` 下的桌面端日志。
+        ⚠️ **贴之前先脱敏**：把 API key、JWT、邮箱、内网 IP 换掉。
+        日志通常比描述有用，别只贴最后一行。
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 自检
+      options:
+        - label: 已搜过现有 issue
+          required: true
+        - label: 日志里的密钥/邮箱/内网地址已脱敏
+          required: true

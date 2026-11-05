@@ -1,0 +1,40 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: astra-system
+
+# 顺序即 kubectl 的 apply 顺序提示（kubectl 自己也会按 kind 排序）。
+# 顺序上真正要保证的是 migrate 先于 api，靠的是 README 里的
+# `kubectl wait --for=condition=complete job/astra-migrate`，不是这里的先后。
+resources:
+  - namespace.yaml
+  - config.yaml
+  # 开发用 PG。生产改成外部 RDS 时把这一行注释掉（文件里有说明）
+  - postgres.yaml
+  - migrate-job.yaml
+  - astra-api.yaml
+  # 注意：secret.example.yaml 刻意不在这里 —— 它是示例，含假值，
+  # 被 apply 会把假密码写进集群，真值走 kubectl create secret / ESO。
+
+# ── 为什么这里只有 astra-api ──────────────────────────────────
+# 曾经这里还列了 astra-worker / astra-sandboxd / astra-gateway 三个
+# Deployment，但 `cmd/` 下并没有对应的二进制 —— 它们的镜像永远不会存在，
+# apply 之后就是三个 ImagePullBackOff，把真正的问题（api 起没起来）淹没掉。
+#
+# 当前架构里这三件事都由 astra-api 单进程承担（见 docs/架构设计方案.md 的
+# 「单副本假设」一节）。拆成独立组件的前提是：审批注册表从内存迁到 PG、
+# worker 与 api 之间的 run 派发协议定下来。那之前把它们摆在清单里只是装饰。
+# 各自的清单已移到 deploy/k8s/future/，保留设计意图但不参与 apply。
+images:
+  - name: harbor.astra.local/astra/astra-api
+    newTag: latest
+
+# ── 镜像 tag 的覆盖方式 ────────────────────────────────────────
+# base 里写 :latest 是刻意的：它是合法、可解析、能直接 pull 的引用。
+# 早期版本用过全大写的占位字符串，那不是合法的镜像引用，
+# `kubectl apply -k` 会直接报 invalid image，连 dry-run 都过不去。
+#
+# CI 在 apply 之前覆盖，两种方式任选：
+#   1) GitOps：deploy/ci/gitops-bump.sh 改 overlays/<env>/kustomization.yaml
+#      里的 newTag，提交后由同步器应用（推荐，可回溯）
+#   2) 本地验证：kustomize edit set image harbor.astra.local/astra/astra-api:dev
+#      然后 kubectl apply -k .（不要提交这次改动）

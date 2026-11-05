@@ -1,0 +1,38 @@
+# Astra 命名空间分层
+#
+# 为什么要分四个 ns 而不是一个：
+#   cube 池跑的是 privileged pod（需要 /dev/kvm、hostPID），业务 ns 应该开 baseline/restricted。
+#   混在一起 PodSecurity 等于白设，等保审查也过不去。
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: astra-system
+  labels:
+    name: astra-system
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: astra-data
+  labels:
+    name: astra-data
+---
+# ⚠️ 这是唯一允许 privileged 的命名空间
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: astra-cube
+  labels:
+    name: astra-cube
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: astra-ops
+  labels:
+    name: astra-ops

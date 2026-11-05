@@ -1,0 +1,100 @@
+# ── secrets：绝不入库 ──────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+kubeconfig*
+# 只挡凭据数据文件。早先写成 *credentials* 会把源码一起挡掉——
+# internal/runner/credentials.go（凭据签发接口）就因此没入库，
+# 别人 clone 下来 make build 直接 undefined，本机却完全正常。
+*credentials*
+!*.go
+secrets/
+
+# ── Go ────────────────────────────────────────────
+/bin/
+/dist/
+
+# 运行时数据目录：数据库、jwt-secret、llm-key.json、沙箱工作区都落在这里。
+# 默认 <仓库>/data。不挡的话，新人跑一遍 make serve 再 git add 就把自己的密钥提交了。
+/data/
+/data-*/
+*.db
+*.db-shm
+*.db-wal
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+coverage.txt
+coverage.html
+
+# ── Node / 前端 ───────────────────────────────────
+node_modules/
+.pnpm-store/
+.npm/
+dist/
+build/
+.next/
+.turbo/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+# 例外：前端构建产物要入库。
+# 因为 go:embed 在编译期就要读到它——不入库的话「克隆下来 go build」会直接失败，
+# 必须先在本地装 node。产物 ~200KB，换「一条命令能跑起来」这笔账是划算的。
+!internal/api/web/dist/
+!internal/api/web/dist/**
+
+# dsh-trim 里这些是产物，不入库
+dsh-trim/*.tgz
+dsh-trim/node_modules/
+
+# ── Flutter / Dart（app/） ────────────────────────
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+**/android/.gradle/
+**/android/local.properties
+**/ios/Pods/
+**/ios/.symlinks/
+*.iml
+
+# ── 构建 / 打包产物 ───────────────────────────────
+*.apk
+*.aab
+*.ipa
+*.dmg
+*.zip
+*.tar.gz
+
+# ── 编辑器 / IDE ──────────────────────────────────
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ── 操作系统 ──────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+
+# ── 本地临时 ──────────────────────────────────────
+tmp/
+.tmp/
+*.log
+!deploy/**/*.log

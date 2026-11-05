@@ -1,0 +1,8 @@
+# OpenAPI 契约（跳转说明）
+
+契约正文只有一份，在 **`internal/api/openapi.yaml`**。
+
+为什么不在本目录：Go 的 `//go:embed` 不能引用父目录，契约必须在 `internal/api/`
+下才能被编进二进制（`GET /v1/openapi.json` 与 `GET /docs` 都读它）。
+若这里再放一份副本，两份迟早不一致——而「契约漂移」正是这套设计要消灭的问题。
+所以本文件只是指路牌，请改 `internal/api/openapi.yaml`。

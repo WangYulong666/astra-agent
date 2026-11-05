@@ -1,0 +1,112 @@
+# astra-worker：ACP Client，驱动 agent、转发事件、处理权限请求
+#
+# ⚠️ 现状：`cmd/worker` 还不存在（仓库里只有 cmd/astra-server 这一个控制面）。
+#    本文件是**接口契约**，不是能跑起来的工作负载：apply 之后会 ImagePullBackOff
+#    或者起来后探针失败。别把它当成「worker 已有」的证据，见 deploy/README.md
+#    的「未实现的部分」。
+#
+# 用 StatefulSet 而不是 Deployment 的两个实打实理由：
+#   1. 会话按 session_id 哈希到具体 worker，需要稳定标识（worker-0/1/2）参与哈希，
+#      Deployment 的随机 pod 名每次滚动都变，哈希环会整体重排，所有会话跟着迁移。
+#   2. 滚动更新时必须一个一个来 —— 每个 worker 手里都攥着一批 ACP 长连接，
+#      同时干掉两个会让大批会话同时进 reconnecting。
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: astra-worker
+  namespace: astra-system
+spec:
+  serviceName: astra-worker
+  replicas: 3
+  podManagementPolicy: Parallel        # 启动并行，但更新仍串行（见 updateStrategy）
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate: { partition: 0 }
+  selector:
+    matchLabels: { app: astra-worker }
+  template:
+    metadata:
+      labels: { app: astra-worker }
+      annotations:
+        # 单端口暴露指标：/healthz /readyz /metrics 与 api 一致，都挂在 HTTP 端口上
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      # ACP 连接收尾 + 事件 flush 需要时间，默认 30s 会被 SIGKILL 截断
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: harbor.astra.local/astra/astra-worker:latest
+          ports:
+            # 7070 是 gRPC（h2c）。HTTP 探针打不上 gRPC 端口，
+            # 所以健康与指标另开一个 HTTP 端口 —— 这不是「多余的假端口」，
+            # 而是探针唯一的落点；实现 worker 时这个端口必须真有 /healthz。
+            - { name: grpc, containerPort: 7070 }
+            - { name: http, containerPort: 9090 }
+          env:
+            - { name: ASTRA_WORKER_ID, valueFrom: { fieldRef: { fieldPath: metadata.name } } }
+            - name: ASTRA_PG_DSN
+              valueFrom: { secretKeyRef: { name: astra-db, key: dsn } }
+            - name: ASTRA_CUBE_API
+              valueFrom: { configMapKeyRef: { name: astra-config, key: cube-api-url } }
+            - { name: ASTRA_SANDBOX_PROVIDER, value: cubesandbox }
+            # ACP 连接空闲多久断开（不是沙箱回收，沙箱由 sandboxd 管）
+            - { name: ASTRA_ACP_IDLE_TIMEOUT, value: "15m" }
+          # 存活：进程活着就行；就绪：能连上 PG（会话锁要靠它）
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          lifecycle:
+            preStop:
+              exec:
+                # 关键：先 drain 再退出。立刻放弃 PG advisory lock，
+                # 让 api 把该 worker 的会话立即标 reconnecting，其他 worker 抢锁接管。
+                # 不 drain 的话要等 lease 15s 超时，用户会看到 15 秒白屏。
+                # ⚠️ drain 子命令同样尚未实现（属于 worker 二进制的契约）
+                command: ["/usr/local/bin/astra-worker", "drain", "--wait=60s"]
+          resources:
+            requests: { cpu: 500m, memory: 512Mi }
+            limits:   { memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+# headless service：StatefulSet 需要它来给 pod 稳定 DNS（worker-0.astra-worker…）
+apiVersion: v1
+kind: Service
+metadata:
+  name: astra-worker
+  namespace: astra-system
+spec:
+  clusterIP: None
+  selector: { app: astra-worker }
+  ports:
+    - { name: grpc, port: 7070, targetPort: grpc }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: astra-worker
+  namespace: astra-system
+spec:
+  # 3 副本最多同时挂 1 个 —— 因为每个 worker 手里的会话要靠其他 worker 接管，
+  # 同时挂两个会让剩下那个瞬间承接 2/3 的连接，容易连锁雪崩
+  maxUnavailable: 1
+  selector:
+    matchLabels: { app: astra-worker }

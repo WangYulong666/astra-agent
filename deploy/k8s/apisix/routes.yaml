@@ -1,0 +1,102 @@
+# 路由：普通 REST 走 HTTPRoute，SSE/WS 走 ApisixRoute
+---
+# 普通 API 路由
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: astra-api
+  namespace: astra-system
+spec:
+  parentRefs:
+    - name: astra-gw
+  hostnames:
+    - "api.astra.example.com"
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: /v1 }
+      backendRefs:
+        - name: astra-api
+          port: 8080
+    - matches:
+        - path: { type: PathPrefix, value: /admin }
+      backendRefs:
+        - name: astra-api
+          port: 8080
+---
+# webhook 不走 JWT，靠 IP 白名单 + 签名校验（在 gateway 内部做签名验证）
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: astra-webhooks
+  namespace: astra-system
+spec:
+  parentRefs:
+    - name: astra-gw
+  hostnames:
+    - "hook.astra.example.com"
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: /webhooks }
+      backendRefs:
+        - name: astra-gateway
+          port: 8090
+---
+# ⚠️ SSE 事件流：必须显式关掉 Nginx 缓冲，否则事件会被攒在网关不发出去，
+#    表现是「前端一直转圈、一分钟后连接被断开，事件才一次性涌出来」。
+#
+# 这里加 priority: 100 保证它比上面的 /v1 PathPrefix 优先匹配 ——
+# 两条路由都命中 /v1/runs/*/events 时，APISIX 按 priority 高的走。
+apiVersion: apisix.apache.org/v2
+kind: ApisixRoute
+metadata:
+  name: astra-sse
+  namespace: astra-system
+spec:
+  http:
+    - name: run-events-sse
+      priority: 100
+      match:
+        paths:
+          - /v1/runs/*
+      backends:
+        - serviceName: astra-api
+          servicePort: 8080
+      plugins:
+        - name: proxy-control
+          enable: true
+          config:
+            request_buffering: false
+        # 基础防护：单 IP 600 req/min。业务级配额（按租户、按 run）在 astra-api /
+        # astra-gateway 里判 —— 网关看不到 JWT claim，也看不到一次 run 内的模型调用次数。
+        - name: limit-count
+          enable: true
+          config:
+            count: 600
+            time_window: 60
+            key_type: var
+            key: remote_addr
+            rejected_code: 429
+---
+# WebSocket 终端通道（可选功能）
+# APISIX 默认透传 Upgrade 头，但到上游的 keepalive 要短，
+# 否则长连接会占住 connection pool 导致新请求排队。
+apiVersion: apisix.apache.org/v2
+kind: ApisixRoute
+metadata:
+  name: astra-terminal-ws
+  namespace: astra-system
+spec:
+  http:
+    - name: session-terminal
+      priority: 100
+      match:
+        paths:
+          - /v1/sessions/*
+      backends:
+        - serviceName: astra-api
+          servicePort: 8080
+      plugins:
+        - name: proxy-control
+          enable: true
+          config:
+            request_buffering: false

@@ -1,0 +1,154 @@
+# astra-api：HTTP/SSE 入口、鉴权、聚合查询（无状态，可随意扩缩）
+#
+# 前端 SPA 用 Go embed 打进同一个二进制，不单独起 nginx ——
+# 省一个 Deployment、一个 Service，也省掉「静态资源版本和 API 版本对不上」这类问题。
+#
+# ── 三个必须知道的实际情况（都核对过 cmd/astra-server/main.go）──
+# 1) 程序只认 flag，不认同名环境变量。所以配置全部走 args，env 只作为
+#    $(VAR) 替换的载体（见 config.yaml 顶部说明）。写 ASTRA_XXX 环境变量
+#    然后指望程序自己读，是无效的。
+# 2) /healthz、/readyz、/metrics 和业务 API **共用一个监听端口**（-addr）。
+#    代码里没有第二个监听器，所以这里不再声明 9090「metrics 端口」——
+#    那个端口以前就是个摆设，探针打上去必然失败。
+# 3) 一期 LLM 网关在 astra-api 进程内（-llm-gateway），所以 api 自己需要
+#    上游 key；独立 astra-gateway 二进制还不存在。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: astra-api
+  namespace: astra-system
+  labels: { app: astra-api }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: astra-api }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels: { app: astra-api }
+      annotations:
+        # 单端口暴露指标，抓 /metrics 走业务端口本身
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532          # distroless nonroot
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: api
+          image: harbor.astra.local/astra/astra-api:latest
+          # 必须 -addr=:8080：默认值 127.0.0.1:7788 只监听回环，
+          # 在 pod 里等于「kubelet 探针都连不上」。
+          args:
+            - "-addr=:8080"
+            - "-data=/data"
+            - "-provider=cube"
+            # dsh 自带文件级沙箱，平台不再外面套一层（见 resolveAgent 注释）
+            - "-agent=dsh"
+            - "-store=$(ASTRA_STORE)"
+            - "-dsn=$(ASTRA_PG_DSN)"
+            - "-jwt-secret=$(ASTRA_JWT_SECRET)"
+            - "-require-auth=true"
+            # 网关开关与上游来自 ConfigMap，key 来自 Secret
+            - "-llm-gateway=$(ASTRA_LLM_GATEWAY)"
+            - "-llm-upstream=$(ASTRA_LLM_UPSTREAM)"
+            - "-llm-provider=$(ASTRA_LLM_PROVIDER)"
+            # 真 key 用 -llm-key 传，**不用** DEEPSEEK_API_KEY 环境变量：
+            # resolveAgent 在 agent=dsh 时会把 DEEPSEEK_API_KEY 转发进沙箱，
+            # 那样真 key 就跟着 agent 进沙箱了，与「真 key 只留控制面」直接冲突。
+            # 代价是 key 会出现在进程 argv 里，可接受（distroless 无 shell，
+            # 容器内没有别的进程可以读 /proc/<pid>/cmdline）。
+            - "-llm-key=$(ASTRA_LLM_KEY)"
+            # 会话级虚拟 key 的注入目标地址。配了它，沙箱里就只有 2 小时有效期的
+            # 虚拟 key；不配则退回「把真 key 转发进沙箱」——生产不能是这个状态。
+            - "-llm-public-url=$(ASTRA_LLM_PUBLIC_URL)"
+            # 虚拟 key 有效期。比「一次对话可能持续多久」长、比「key 泄露后的
+            # 可利用窗口」短，2 小时是这两者的折中。
+            - "-llm-key-ttl=2h"
+            # ── 沙箱生命周期治理 ──
+            # 回收是兜底：客户端关标签页、进程崩过、用户忘了删，这些沙箱没人收。
+            # 空闲 30 分钟是「午休回来还想接着聊」与「别一直占着资源」的折中。
+            - "-sandbox-sweep=5m"
+            - "-sandbox-idle=30m"
+            - "-sandbox-max-age=6h"
+            # 每租户并发沙箱上限。准入控制（超限直接拒绝建会话），不是事后清理。
+            # 0 表示不限——多租户对外时必须改成一个有限值，否则一个租户能占满集群。
+            - "-sandbox-quota=5"
+          ports:
+            - { name: http, containerPort: 8080 }
+          env:
+            # ── 下面这些 env 全是 args 替换用的载体，程序本身不读 ──
+            - name: ASTRA_STORE
+              valueFrom: { configMapKeyRef: { name: astra-config, key: store } }
+            - name: ASTRA_LLM_GATEWAY
+              valueFrom: { configMapKeyRef: { name: astra-config, key: llm-gateway } }
+            - name: ASTRA_LLM_UPSTREAM
+              valueFrom: { configMapKeyRef: { name: astra-config, key: llm-upstream } }
+            - name: ASTRA_LLM_PROVIDER
+              valueFrom: { configMapKeyRef: { name: astra-config, key: llm-provider } }
+            - name: ASTRA_LLM_PUBLIC_URL
+              valueFrom: { configMapKeyRef: { name: astra-config, key: llm-public-url } }
+            # ── 密钥：全部来自 Secret，绝不写进 ConfigMap ──
+            - name: ASTRA_PG_DSN
+              valueFrom: { secretKeyRef: { name: astra-db, key: dsn } }
+            - name: ASTRA_JWT_SECRET
+              valueFrom: { secretKeyRef: { name: astra-auth, key: jwt-secret } }
+            - name: ASTRA_LLM_KEY
+              valueFrom: { secretKeyRef: { name: astra-llm, key: api-key } }
+          # 存活探针只看进程活着没：/healthz 永远 200，卡死也返回 200 是它的定义
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # 就绪探针真的去戳 store / admin（1s 预算），依赖挂了就 503 摘流量
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits:   { memory: 768Mi }   # 不设 cpu limit，避免被 throttle
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            # -data 指向这里。readOnlyRootFilesystem 下必须有可写盘，
+            # 否则沙箱 workspace 建不出来；用 emptyDir 而不是 PVC：
+            # 会话状态在 PG 里，本地目录只是沙箱工作区，丢了不影响恢复。
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: astra-api
+  namespace: astra-system
+spec:
+  selector: { app: astra-api }
+  ports:
+    # 只暴露一个端口：API、SSE、探针、/metrics 都在它上面
+    - { name: http, port: 8080, targetPort: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: astra-api
+  namespace: astra-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels: { app: astra-api }

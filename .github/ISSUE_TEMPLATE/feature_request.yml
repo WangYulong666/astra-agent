@@ -1,0 +1,56 @@
+name: 功能建议
+description: 想要的能力、改进、或者你打算动手做的改动
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        这个项目的取舍比较硬（见 README「三条不可让步的约束」），先说清**你在什么场景下卡住了**，
+        比直接给方案更容易被接受——方案要过那三条红线。
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及哪一层
+      options:
+        - 工作台前端（Web / 桌面 UI）
+        - 手机 App（Android 壳 / 移动端体验）
+        - 控制面（API / 认证 / 计费 / 审批）
+        - 沙箱层（local / applecontainer / cube）
+        - Agent 与协议（ACP / dsh / 工具）
+        - 部署（k8s / 反向代理 / 存储）
+        - 文档
+    validations:
+      required: true
+
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 你在做什么的时候卡住了
+      description: 具体场景，越具体越好。「每次 agent 跑完我都要手动 XXX」比「希望更好用」有用一百倍。
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你希望怎么解决
+      description: 有方案就写方案；没有就写「不知道，但希望能 XXX」。两者都接受。
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 你试过的替代做法
+      description: 现版本里有没有绕过去的方式？如果有，说明这确实是个缺口。
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: 参与意愿
+      options:
+        - label: 我可以自己提 PR 实现
+        - label: 我可以帮忙验证 / 测边界情况

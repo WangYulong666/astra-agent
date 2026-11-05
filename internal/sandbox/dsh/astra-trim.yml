@@ -1,0 +1,31 @@
+# astra 的 dsh 裁剪层（用 --patch 叠加，不写进 DSH_HOME）。
+#
+# ── 一、禁掉缺依赖的插件 ─────────────────────────────────────────
+# llm-pi-ai / otel / session-telemetry-otel 在裁剪安装里缺依赖
+# （@earendil-works/pi-ai、@deepseek-ai/dsh-otel、@opentelemetry/api-logs），
+# 一 import 就失败。**失败警告写的是 stdout**，而 ACP 的 NDJSON 也走 stdout——
+# 一行 "llm-pi-ai (...): failed to import: ..." 就足以让整条协议流解析失败，
+# 现象是 session/new 报 invalid character 'l' looking for beginning of value，
+# 看起来像协议不兼容，实际只是日志串台。
+# 它们对 astra 也没有价值：pi-ai 是别的 provider 的通道（我们走 deepseek-official
+# → dsh-llm-deepseek-api-key），otel 是遥测上报。
+- id: llm-pi-ai
+  disabled: true
+- id: otel
+  disabled: true
+- id: session-telemetry-otel
+  disabled: true
+
+# ── 二、沙箱与审批 ──────────────────────────────────────────────
+# 这里**不改** sandbox-policy.mode，保持默认 workspace-write：
+# dsh 自己用 Seatbelt 把写限制在会话工作区内，这就是本地这一层强制边界。
+# 平台外层（local provider）因此不再套 sandbox-exec——macOS 不允许沙箱嵌套，
+# 两层同时开的结果是内层 sandbox_apply 失败、agent 的 bash 全部报
+# "sandbox backend unusable"。谁负责隔离由 AgentSpec.SelfSandbox 显式声明。
+#
+# approval 钉回 ask：dsh 默认会从 mode 推导（danger-full-access → never），
+# 但我们要的正是「模型想扩权时必须先问人」。ask 时 dsh 的 approval 接缝
+# 经 dsh-acp 转成 ACP 的 session/request_permission，落到 astra 的审批注册表。
+- id: approval
+  config:
+    policy: ask

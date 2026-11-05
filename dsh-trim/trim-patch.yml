@@ -1,0 +1,20 @@
+# Astra 沙箱 dsh 裁剪补丁
+#
+# 必须随启动命令一起传：dsh --profile acp --patch /opt/dsh/trim-patch.yml
+#
+# 1) llm-pi-ai：多厂商 LLM 抽象层。禁用后只认 provider=deepseek-official，
+#    对应 trim.sh ⑤ 删掉的 openai/anthropic/google/aws SDK。
+# 2) otel / session-telemetry-otel：关闭遥测。包已被 trim.sh ④ 删除，
+#    这里显式 disabled，避免 loader 尝试加载时报错刷日志。
+#
+# 注意：这三个插件原本是 lazy load，即使不传 patch 也能握手成功；
+# 但一旦走非 DeepSeek provider 或触发遥测上报就会崩。所以 patch 不是可选优化，是运行契约。
+
+- id: llm-pi-ai
+  disabled: true
+
+- id: otel
+  disabled: true
+
+- id: session-telemetry-otel
+  disabled: true

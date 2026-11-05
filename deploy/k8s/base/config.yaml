@@ -1,0 +1,57 @@
+# 非敏感配置（ConfigMap）
+#
+# 这里只放「泄露了也不致命」的值。所有密钥在 secret.example.yaml 里，
+# 真值由 kubectl create secret / External Secrets 注入，不入 git。
+#
+# 关于 env 名的说明（重要）：
+#   astra-server 是纯 flag 程序（cmd/astra-server/main.go 用标准库 flag 解析），
+#   **不读任何 ASTRA_* 环境变量**。下面几个键之所以同时以 ASTRA_ 形式出现在
+#   Deployment 的 env 里，是为了能写 args: ["-store=$(ASTRA_STORE)"] —— k8s 会先用
+#   容器 env 做 $(VAR) 替换，再把结果当命令行参数传给进程。也就是说 env 只是
+#   「参数传递的载体」，程序本身并不解析它；改配置只改这里，不用动 Deployment。
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: astra-config
+  namespace: astra-system
+data:
+  # ── 存储 ────────────────────────────────────────────────────
+  # 一期用 PG（多副本共享、支持租户与计费）。可选 sqlite / file，
+  # 但那两种撑不起 api 的 3 副本，只能用于单机排障。
+  # 注意：DSN 含密码，不放这里，见 secret.example.yaml 的 astra-db。
+  store: "postgres"
+
+  # ── LLM 网关 ────────────────────────────────────────────────
+  # 只在控制面开网关：真 key 留在进程内存里，沙箱拿到的是短期虚拟 key。
+  llm-gateway: "true"
+  # 上游 base_url。代码默认值就是 https://api.deepseek.com（不带 /v1），
+  # 这里显式写出来是为了让「换了上游」这件事在 git 里有迹可循。
+  # ⚠️ 别自作主张加 /v1：SDK 会自己拼 /chat/completions，拼重复了报 404。
+  llm-upstream: "https://api.deepseek.com"
+  # 记账用的 provider 名，与 usage 表的 provider 列对应
+  llm-provider: "deepseek"
+  # 网关对 **agent 视角** 可达的根地址（只到主机端口，不带任何路径后缀）。
+  # 平台会自己拼成 <根>/v1/llm/anthropic 注入给 dsh 的 DEEPSEEK_BASE_URL；
+  # dsh 再拼 /v1/messages，正好落到上游的 /anthropic/v1/messages。
+  #
+  # ⚠️ 不要在这里加 /v1/llm —— 加了会变成 .../v1/llm/v1/llm/anthropic。
+  # ⚠️ 必须是集群内 Service 名而不是公网域名：沙箱只走内网。
+  # ⚠️ 与控制面自己的 -addr 不是一回事（那个是 0.0.0.0:8080 的监听地址），
+  #    这里要的是 agent 沙箱能解析到的地址，两者不能互相推导。
+  llm-public-url: "http://astra-api.astra-system.svc:8080"
+
+  # ── 沙箱 ────────────────────────────────────────────────────
+  # CubeSandbox 控制面地址（集群内 Service）
+  cube-api-url: "http://cubemaster.astra-cube.svc:8080"
+  # 沙箱出网默认拒绝，只放行这一段（k3s 默认 Service CIDR）
+  sandbox-allow-out: "10.43.0.0/16"
+  acp-proxy-port: "7443"
+
+  # ── 依赖组件地址 ────────────────────────────────────────────
+  # 一期配额计数落这里；选 Valkey 而不是 Redis 是为避开 RSALv2/SSPL
+  valkey-addr: "valkey.astra-data.svc:6379"
+  # 开发用 PG 的集群内地址（见 postgres.yaml）。生产改用外部 RDS 时
+  # 只改 secret 里的 dsn，这两个键不会被工作负载使用（留给排障时查）。
+  pg-host: "postgres.astra-system.svc"
+  pg-port: "5432"

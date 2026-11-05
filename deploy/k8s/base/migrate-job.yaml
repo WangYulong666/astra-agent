@@ -1,0 +1,72 @@
+# 建表 Job：在 api 起来之前把 astra 的表建好
+#
+# ── 为什么是独立的 Job，而不是 api 的 initContainer ──────────────
+# api 有多个副本，initContainer 会在每个副本里各跑一次 DDL；虽然迁移是
+# 版本化的（schema_migrations 记录已应用版本）、重复执行幂等，但多个连接同时
+# 抢 PG 的 DDL 锁，冷启动时能把启动时间拉长到几十秒，报错信息还很难懂
+# （deadlock detected）。独立 Job 有 replicas=1 的天然语义，只跑一次，
+# 失败就停在 Failed 等人看。
+#
+# 本仓库不用 Helm，也不用 ArgoCD 的 sync-wave，所以顺序**不靠注解**，
+# 靠 README 里的 `kubectl wait --for=condition=complete job/astra-migrate`。
+#
+# ── 为什么用 astra-server -migrate-only，而不是 psql ─────────────
+# 早期版本用 `psql -f schema_pg.sql` 跑一份手抄的 DDL 副本，因为当时没有
+# 迁移入口。那是权宜之计，代价是 DDL 有两个事实来源——加一个版本就得同步
+# 两处，漏一次就出现「Job 说成功但表少了一张」这种最难查的问题。
+#
+# 现在 astra-server 支持 `-migrate-only`：用的是**运行时同一份**代码里的
+# schema 与版本表，跑完即退出，不进入 HTTP 监听。DDL 只剩一个事实来源。
+#
+# ⚠️ 与运行期迁移的关系：astra-api 启动时仍会跑一遍（schema_migrations 自己
+#    记录版本、已应用的跳过）。两者幂等、互不冲突；Job 的作用是让第一次部署
+#    时 api 的 /readyz 立刻变绿，而不是唯一入口。
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: astra-migrate
+  namespace: astra-system
+  labels: { app: astra-migrate }
+spec:
+  # 失败重试 3 次后放弃：DDL 反复失败通常是 DSN 错或库不可达，重试没意义
+  backoffLimit: 3
+  # 兜底：卡住 5 分钟就杀掉，避免部署流程永远等在这里
+  activeDeadlineSeconds: 300
+  # 跑完 1 小时后自动清理，否则每次 gitops 同步都要看到一堆 Completed 的 Job
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels: { app: astra-migrate }
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532          # distroless 的 nonroot，与 astra-api 保持一致
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: migrate
+          image: harbor.astra.local/astra/astra-api:latest
+          args:
+            - -migrate-only
+            - -store=$(ASTRA_STORE)
+            - -dsn=$(ASTRA_PG_DSN)
+            # 迁移只需要库里那点事，数据目录指向 emptyDir 即可（sqlite 分支才用得上）
+            - -data=/tmp
+          env:
+            - name: ASTRA_STORE
+              valueFrom: { configMapKeyRef: { name: astra-config, key: store } }
+            - name: ASTRA_PG_DSN
+              valueFrom: { secretKeyRef: { name: astra-db, key: dsn } }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,23 @@
+# prod overlay
+#
+# 与 staging 的结构完全相同，差别只该出现在「确实需要不同的地方」：
+# 副本数、资源、外部依赖地址。目前刻意一处都没差异化 —— 加了没人验证过的
+# patch 只是制造「prod 和 staging 跑的不是同一套清单」的错觉。
+# 真要差异化时，在这里加 patches / replicas，不要回去改 base。
+#
+# ⚠️ prod 用外部 RDS 时，记得把 base/postgres.yaml 从 base 的 resources 里注释掉，
+#    否则会在 prod 集群里也起一个单副本开发库。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: astra-system
+resources:
+  - ../../base
+images:
+  - name: harbor.astra.local/astra/astra-api
+    newTag: latest
+  - name: harbor.astra.local/astra/astra-worker
+    newTag: latest
+  - name: harbor.astra.local/astra/astra-sandboxd
+    newTag: latest
+  - name: harbor.astra.local/astra/astra-gateway
+    newTag: latest

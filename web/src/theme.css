@@ -1,0 +1,1878 @@
+/* Astra —— 视觉层（theme）
+   ─────────────────────────────────────────────────────────────
+   这一层只做「长什么样」：颜色、字体、阴影、圆角、过渡、动效。
+   刻意不碰布局（宽高、position、display、flex/grid、栅格尺寸、内外边距的
+   骨架部分），原因有两个：
+
+   1. styles.css 里的布局正被并行改造，两边同时动同一批属性必然打架；
+   2. 视觉层本来就是可整体替换的——哪天换一套主题，删掉这个文件即可复原。
+
+   加载顺序：styles.css → theme.css（见 main.tsx）。
+   选择器一律沿用 styles.css 里已有的真实类名，靠「同选择器 + 后加载」覆盖，
+   需要更明确时用 :where()/:has() 提权，不靠 !important 硬压。
+
+   唯一的例外是 `.msg-assistant` / `.empty::before` 这类加了少量内边距和装饰
+   元素的地方——卡片化本身就需要一点留白，否则「surface 底 + 内边框」贴着
+   文字会糊成一团。
+*/
+
+/* ═══ 1. Token ═══════════════════════════════════════════════
+   旧变量名（--bg / --panel / --panel-2 / --border / --text …）
+   全部沿用，只改值；新增的一律 --t- 前缀，避免和布局层撞名。 */
+
+:root {
+  /* — 背景三阶：canvas（页面底） / surface（面板） / elevated（浮起卡片） — */
+  --bg: #0b0d12;
+  --bg-grad-1: #101521;
+  --bg-grad-2: #090b11;
+  --panel: #12151c;
+  --panel-2: #181c25;
+  --elev: #1e232e;
+
+  /* 纯功能性底色：比 surface 更深，用于代码块 / 工具输出这类"凹进去"的区域 */
+  --t-sunken: #0a0d13;
+  --t-sunken-2: #0d1017;
+
+  /* — 边框两阶 — */
+  --border: #232934;
+  --border-2: #323a48;
+  --t-border-soft: rgba(255, 255, 255, 0.055);
+  --t-border-strong: rgba(255, 255, 255, 0.11);
+
+  /* — 文字三阶（对比度实测见文末注释） — */
+  --text: #eef2f9; /* 正文      15.2:1 ~ 17.3:1 */
+  --text-2: #b9c3d4; /* 次要      9.6:1 ~ 10.9:1 */
+  --muted: #8e99ac; /* 三级      5.9:1 ~ 6.8:1 */
+  --t-text-faint: #7b8798; /* 占位/时间是装饰性文字，4.5:1 上下 */
+
+  /* — 强调色（三阶 + 半透明底） — */
+  --accent: #7ba0ff;
+  --accent-2: #9a7bff;
+  --t-accent-hover: #93b2ff;
+  --t-accent-active: #6b8fef;
+  --accent-soft: rgba(123, 160, 255, 0.14);
+  --t-accent-softer: rgba(123, 160, 255, 0.07);
+  --t-accent-line: rgba(123, 160, 255, 0.28);
+
+  /* — 语义色（各带半透明底） — */
+  --green: #4fe0a4;
+  --green-soft: rgba(79, 224, 164, 0.13);
+  --amber: #f5bd63;
+  --amber-soft: rgba(245, 189, 99, 0.13);
+  --red: #ff8585;
+  --red-soft: rgba(255, 133, 133, 0.13);
+  --t-info: #6bb6ff;
+  --t-info-soft: rgba(107, 182, 255, 0.13);
+
+  /* — 字体栈：中文优先，Windows/Linux 回落雅黑/思源 — */
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI",
+    "PingFang SC", "HarmonyOS Sans SC", "Hiragino Sans GB", "Microsoft YaHei",
+    "Source Han Sans SC", "Noto Sans CJK SC", sans-serif;
+  --mono: "SF Mono", "JetBrains Mono", "Cascadia Code", "Roboto Mono", Menlo,
+    Consolas, "Liberation Mono", "Microsoft YaHei Mono", monospace;
+
+  /* — 字号阶（带配套行高；中文要有行高才不挤） — */
+  --t-fs-11: 11.5px;
+  --t-fs-12: 12.5px;
+  --t-fs-13: 13.5px;
+  --t-fs-14: 15px;
+  --t-fs-17: 17px;
+  --t-fs-20: 20px;
+  --t-fs-24: 24px;
+  --t-lh-11: 1.45;
+  --t-lh-12: 1.6;
+  --t-lh-13: 1.65;
+  --t-lh-14: 1.7;
+  --t-lh-17: 1.45;
+  --t-lh-20: 1.3;
+  --t-lh-24: 1.2;
+
+  /* — 字重 — */
+  --t-w-regular: 400;
+  --t-w-medium: 500;
+  --t-w-semi: 600;
+  --t-w-bold: 680;
+
+  /* — 间距阶（只在视觉层需要留白的地方用） — */
+  --t-s1: 4px;
+  --t-s2: 8px;
+  --t-s3: 12px;
+  --t-s4: 16px;
+  --t-s5: 24px;
+  --t-s6: 32px;
+
+  /* — 圆角阶 — */
+  --radius: 10px;
+  --t-r1: 6px;
+  --t-r2: 10px;
+  --t-r3: 14px;
+  --t-r4: 20px;
+
+  /* — 阴影三阶 + 内发光描边 — */
+  --t-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --t-shadow-2: 0 6px 20px -8px rgba(0, 0, 0, 0.55), 0 1px 2px rgba(0, 0, 0, 0.35);
+  --t-shadow-3: 0 24px 60px -20px rgba(0, 0, 0, 0.75), 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow: var(--t-shadow-2);
+  --t-inset-glow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+
+  /* — 过渡 — */
+  --t-ease: cubic-bezier(0.2, 0.8, 0.3, 1);
+  --t-dur-1: 120ms;
+  --t-dur-2: 180ms;
+}
+
+/* ═══ 2. 基础 ═══════════════════════════════════════════════ */
+
+body {
+  /* 三阶背景：主渐变 + 顶部一层极淡的冷光，避免整块死黑 */
+  background:
+    radial-gradient(1100px 520px at 18% -12%, #141b29 0%, transparent 62%),
+    radial-gradient(900px 480px at 92% 4%, rgba(154, 123, 255, 0.055) 0%, transparent 60%),
+    var(--bg-grad-2);
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14.5px;
+  line-height: 1.65;
+  letter-spacing: 0.002em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgba(123, 160, 255, 0.32);
+  color: #fff;
+}
+
+:where(button, a, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.composer textarea:focus-visible {
+  /* 输入框的焦点环由 .composer:focus-within 统一画，避免套两层 */
+  outline: none;
+}
+
+/* ── 滚动条：细、半透明、hover 加深 ── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.13);
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.26);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ═══ 3. 顶栏 ═══════════════════════════════════════════════ */
+
+.topbar {
+  /* 半透明 + 模糊，让滚动内容从顶栏下面"透"出来，层次立刻有了 */
+  background: rgba(11, 13, 18, 0.82); /* 不支持 backdrop-filter 时的实色兜底 */
+  border-bottom: 1px solid var(--t-border-soft);
+  box-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.4),
+    0 8px 24px -16px rgba(0, 0, 0, 0.9);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  backdrop-filter: blur(12px) saturate(140%);
+}
+@supports (backdrop-filter: blur(12px)) or (-webkit-backdrop-filter: blur(12px)) {
+  .topbar {
+    background: rgba(11, 13, 18, 0.66);
+  }
+}
+
+.brand {
+  color: var(--text);
+  font-weight: var(--t-w-bold);
+  letter-spacing: 0.15em;
+  font-size: 13px;
+}
+.brand-sub {
+  color: var(--muted);
+  border-left-color: var(--t-border-strong);
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+}
+
+.logo {
+  border-radius: 8px;
+  background: linear-gradient(145deg, #7ba0ff, #9a7bff 62%, #b18cff);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.12),
+    0 4px 14px -2px rgba(123, 160, 255, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.topnav a {
+  color: var(--muted);
+  font-size: var(--t-fs-12);
+  border-radius: 8px;
+  transition: color var(--t-dur-1) var(--t-ease),
+    background-color var(--t-dur-1) var(--t-ease);
+}
+.topnav a:hover {
+  color: var(--text-2);
+  background: rgba(255, 255, 255, 0.04);
+}
+.topnav a.on {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.065);
+  box-shadow: inset 0 0 0 1px var(--t-border-soft);
+}
+
+.chip {
+  color: var(--text-2);
+  background: rgba(255, 255, 255, 0.045);
+  border-color: var(--t-border-soft);
+  font-size: 11.5px;
+  letter-spacing: 0.01em;
+}
+.chip b {
+  color: var(--t-text-faint);
+  font-weight: 500;
+}
+.chip.warn {
+  color: var(--amber);
+  background: var(--amber-soft);
+  border-color: rgba(245, 189, 99, 0.26);
+}
+
+.icon-btn {
+  color: var(--muted);
+  border-radius: 9px;
+  transition: color var(--t-dur-1) var(--t-ease),
+    background-color var(--t-dur-1) var(--t-ease),
+    border-color var(--t-dur-1) var(--t-ease);
+}
+.icon-btn:hover {
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text);
+  border-color: transparent;
+}
+.icon-btn.on {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--t-accent-line);
+  box-shadow: var(--t-inset-glow);
+}
+
+/* ═══ 4. 侧栏 ═══════════════════════════════════════════════ */
+
+.sidebar {
+  /* 比 canvas 亮半档，让「侧栏 / 内容区」不是同一块色 */
+  background: linear-gradient(180deg, rgba(24, 29, 38, 0.96), rgba(13, 16, 21, 0.98));
+  border-right-color: var(--t-border-soft);
+  box-shadow: 1px 0 0 rgba(0, 0, 0, 0.35);
+}
+
+.sidebar-head {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.035);
+}
+
+.btn-new {
+  border-radius: var(--t-r2);
+  font-size: var(--t-fs-13);
+  font-weight: var(--t-w-semi);
+  letter-spacing: 0.01em;
+  background: linear-gradient(145deg, #7396f7, #8b74f5);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.18) inset,
+    0 6px 16px -8px rgba(123, 160, 255, 0.7);
+  transition: filter var(--t-dur-1) var(--t-ease),
+    transform var(--t-dur-1) var(--t-ease),
+    box-shadow var(--t-dur-1) var(--t-ease);
+}
+.btn-new:hover {
+  filter: brightness(1.09) saturate(1.03);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.22) inset,
+    0 8px 20px -8px rgba(123, 160, 255, 0.85);
+}
+.btn-new:active {
+  transform: translateY(1px);
+  filter: brightness(0.98);
+}
+.btn-new:disabled {
+  filter: saturate(0.4) brightness(0.9);
+  opacity: 0.6;
+}
+
+.session-item {
+  border-radius: var(--t-r2);
+  border-color: transparent;
+  transition: background-color var(--t-dur-1) var(--t-ease),
+    box-shadow var(--t-dur-1) var(--t-ease);
+}
+.session-item:hover {
+  background: rgba(255, 255, 255, 0.045);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.045);
+}
+.session-item.active {
+  background: linear-gradient(
+    100deg,
+    rgba(123, 160, 255, 0.14),
+    rgba(154, 123, 255, 0.06) 70%,
+    transparent
+  );
+  border-color: transparent;
+  box-shadow:
+    inset 0 0 0 1px var(--t-accent-line),
+    var(--t-shadow-1);
+}
+/* 当前会话左侧强调条：比原来更长、带光晕，一眼能定位 */
+.session-item.active::before {
+  top: 7px;
+  bottom: 7px;
+  width: 3px;
+  border-radius: 3px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-2));
+  box-shadow: 0 0 10px rgba(123, 160, 255, 0.6);
+}
+
+.session-title {
+  font-size: var(--t-fs-13);
+  font-weight: var(--t-w-medium);
+  color: var(--text);
+  letter-spacing: 0.005em;
+}
+.session-item:not(.active) .session-title {
+  color: var(--text-2);
+  font-weight: var(--t-w-regular);
+}
+
+.session-meta {
+  color: var(--t-text-faint);
+  font-size: 10.5px;
+  letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums;
+}
+/* 会话 id：装饰性的短哈希，压到几乎不见，只留"这是个 id"的暗示 */
+.session-meta .mono {
+  font-size: 10px;
+  color: var(--muted);
+  opacity: 0.62;
+  letter-spacing: 0;
+}
+
+.mini-btn {
+  border-radius: var(--t-r1);
+  color: var(--t-text-faint);
+  transition: color var(--t-dur-1) var(--t-ease),
+    background-color var(--t-dur-1) var(--t-ease);
+}
+.mini-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+.mini-btn.danger:hover {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.title-input {
+  background: var(--t-sunken);
+  border-color: var(--accent);
+  border-radius: var(--t-r1);
+  color: var(--text);
+  box-shadow: 0 0 0 3px var(--t-accent-softer);
+}
+
+.sidebar-foot {
+  border-top-color: var(--t-border-soft);
+  color: var(--t-text-faint);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+}
+.sidebar-foot code {
+  color: var(--text-2);
+  font-size: 10.5px;
+}
+
+/* ═══ 5. 主区头部 / 状态 ════════════════════════════════════ */
+
+.main {
+  background: transparent;
+}
+
+.banner {
+  color: var(--amber);
+  background: linear-gradient(90deg, var(--amber-soft), rgba(245, 189, 99, 0.06));
+  border-bottom-color: rgba(245, 189, 99, 0.22);
+  font-size: 12px;
+}
+
+.main-head {
+  border-bottom: 1px solid var(--t-border-soft);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent);
+}
+
+.main-title {
+  font-size: var(--t-fs-13);
+  font-weight: var(--t-w-semi);
+  color: var(--text);
+  letter-spacing: 0.005em;
+}
+
+.pill {
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+  border-color: var(--t-border-soft);
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text-2);
+}
+.pill.running {
+  color: var(--accent);
+  border-color: var(--t-accent-line);
+  background: var(--accent-soft);
+  box-shadow: 0 0 14px -6px rgba(123, 160, 255, 0.8);
+}
+.pill.waiting_approval {
+  color: var(--amber);
+  border-color: rgba(245, 189, 99, 0.3);
+  background: var(--amber-soft);
+  box-shadow: 0 0 14px -6px rgba(245, 189, 99, 0.7);
+}
+.pill.completed {
+  color: var(--green);
+  border-color: rgba(79, 224, 164, 0.26);
+  background: var(--green-soft);
+}
+.pill.failed {
+  color: var(--red);
+  border-color: rgba(255, 133, 133, 0.3);
+  background: var(--red-soft);
+}
+.pill.cancelled {
+  color: var(--t-text-faint);
+  background: rgba(255, 255, 255, 0.035);
+}
+.sandbox-pill {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--t-text-faint);
+  background: transparent;
+}
+
+.link-btn {
+  color: var(--accent);
+  text-decoration-color: rgba(123, 160, 255, 0.4);
+  transition: color var(--t-dur-1) var(--t-ease);
+}
+.link-btn:hover {
+  color: var(--t-accent-hover);
+}
+
+.jump-bottom {
+  color: var(--text-2);
+  background: rgba(30, 35, 46, 0.92);
+  border-color: var(--t-border-strong);
+  box-shadow: var(--t-shadow-2), var(--t-inset-glow);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  transition: color var(--t-dur-1) var(--t-ease),
+    transform var(--t-dur-1) var(--t-ease),
+    box-shadow var(--t-dur-1) var(--t-ease);
+}
+.jump-bottom:hover {
+  color: var(--text);
+  border-color: var(--t-accent-line);
+  transform: translateX(-50%) translateY(-1px);
+  box-shadow: var(--t-shadow-3), var(--t-inset-glow);
+}
+
+/* ═══ 6. 消息气泡 ═══════════════════════════════════════════ */
+
+/* 入场：120ms 淡入 + 上移 4px。只在挂载时跑一次，流式更新不会反复闪。 */
+.turn {
+  animation: t-msg-in var(--t-dur-1) var(--t-ease) both;
+}
+@keyframes t-msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 用户：强调色浅底 + 不对称圆角（右下收小，指向自己） */
+.msg-user {
+  color: #f4f7ff;
+  background: linear-gradient(155deg, rgba(123, 160, 255, 0.27), rgba(154, 123, 255, 0.17));
+  border: 1px solid rgba(123, 160, 255, 0.42);
+  border-radius: var(--t-r3) var(--t-r3) var(--t-r1) var(--t-r3);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 6px 20px -14px rgba(123, 160, 255, 0.9);
+  font-size: var(--t-fs-14);
+  line-height: var(--t-lh-14);
+  letter-spacing: 0.003em;
+}
+
+/* agent：surface 底 + 内边框，和用户气泡形成"实 vs 空"的对比 */
+.msg-assistant {
+  color: var(--text);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.052), rgba(255, 255, 255, 0.026));
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: var(--t-r3) var(--t-r3) var(--t-r3) var(--t-r1);
+  padding: var(--t-s3) 15px;
+  box-shadow:
+    var(--t-shadow-1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  font-size: var(--t-fs-14);
+  line-height: var(--t-lh-14);
+}
+
+.agent-tag {
+  color: var(--t-text-faint);
+  font-size: 10.5px;
+  font-weight: var(--t-w-semi);
+  letter-spacing: 0.14em;
+}
+.agent-tag .sq {
+  border-radius: 2px;
+  box-shadow: 0 0 8px rgba(123, 160, 255, 0.55);
+}
+
+.streaming-caret {
+  width: 6px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 10px rgba(123, 160, 255, 0.75);
+}
+
+/* ── Markdown 排版 ── */
+.md {
+  font-size: inherit;
+  line-height: inherit;
+}
+.md p {
+  margin-bottom: 0.72em;
+  line-height: var(--t-lh-14);
+}
+.md h1,
+.md h2,
+.md h3 {
+  color: #fff;
+  font-weight: var(--t-w-semi);
+  letter-spacing: -0.005em;
+}
+.md h1 {
+  font-size: var(--t-fs-24);
+  line-height: var(--t-lh-24);
+}
+.md h2 {
+  font-size: var(--t-fs-20);
+  line-height: var(--t-lh-20);
+}
+.md h3 {
+  font-size: var(--t-fs-17);
+  line-height: var(--t-lh-17);
+}
+.md li {
+  margin: 0.28em 0;
+  line-height: var(--t-lh-14);
+}
+.md li::marker {
+  color: var(--muted);
+}
+.md strong {
+  color: #fff;
+  font-weight: var(--t-w-semi);
+}
+.md a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: rgba(123, 160, 255, 0.35);
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+.md a:hover {
+  color: var(--t-accent-hover);
+  text-decoration-color: currentColor;
+}
+.md blockquote {
+  border-left: 2px solid var(--t-accent-line);
+  color: var(--text-2);
+  padding-left: var(--t-s3);
+  font-style: normal;
+}
+.md hr {
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+/* 行内 code：等宽 + 专属底色 + 细边框，和正文一眼分开 */
+.md code {
+  font-family: var(--mono);
+  font-size: 0.87em;
+  background: rgba(255, 255, 255, 0.055);
+  border: 1px solid var(--t-border-soft);
+  border-radius: var(--t-r1);
+  padding: 0.1em 0.4em;
+  color: #d7e0ee;
+  letter-spacing: -0.01em;
+}
+
+/* 代码块：凹进去的一块，顶部一条内发光当"窗口标题栏" */
+.md pre {
+  background: var(--t-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--t-r2);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.045),
+    inset 0 0 24px rgba(0, 0, 0, 0.35);
+  padding: var(--t-s3) 14px;
+}
+.md pre code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.72;
+  color: #cfd8e6;
+  letter-spacing: -0.005em;
+}
+
+/* ═══ 7. 工具调用卡片 ═══════════════════════════════════════ */
+
+/* 左侧状态色条用 inset box-shadow 画——不新增定位元素，自然跟着圆角走 */
+.tool {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.018));
+  border: 1px solid rgba(255, 255, 255, 0.062);
+  border-radius: var(--t-r2);
+  box-shadow: inset 2.5px 0 0 0 var(--t-info);
+  transition: box-shadow var(--t-dur-1) var(--t-ease),
+    border-color var(--t-dur-1) var(--t-ease);
+}
+/* 执行中：色条脉动 */
+.tool:has(.tool-status:not(.done):not(.fail)):has(.spinner) {
+  box-shadow: inset 2.5px 0 0 0 var(--t-info);
+  animation: t-tool-run 1.6s ease-in-out infinite;
+}
+@keyframes t-tool-run {
+  50% {
+    box-shadow: inset 2.5px 0 0 0 rgba(107, 182, 255, 0.35);
+  }
+}
+.tool:has(.tool-status.done) {
+  box-shadow: inset 2.5px 0 0 0 var(--green);
+}
+.tool.failed,
+.tool:has(.tool-status.fail) {
+  box-shadow: inset 2.5px 0 0 0 var(--red);
+  border-color: rgba(255, 133, 133, 0.24);
+  background: linear-gradient(180deg, rgba(255, 133, 133, 0.05), rgba(255, 133, 133, 0.015));
+}
+.tool:hover {
+  border-color: var(--t-border-strong);
+  box-shadow: inset 2.5px 0 0 0 var(--t-info), var(--t-shadow-1);
+}
+.tool:has(.tool-status.done):hover {
+  box-shadow: inset 2.5px 0 0 0 var(--green), var(--t-shadow-1);
+}
+.tool.failed:hover {
+  box-shadow: inset 2.5px 0 0 0 var(--red), var(--t-shadow-1);
+}
+
+.tool-head:hover {
+  background: rgba(255, 255, 255, 0.028);
+}
+
+.tool-kind {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: var(--t-w-medium);
+  letter-spacing: 0.1em;
+  border-radius: var(--t-r1);
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--t-accent-line);
+  box-shadow: var(--t-inset-glow);
+}
+.tool-kind.edit {
+  color: var(--amber);
+  background: var(--amber-soft);
+  border-color: rgba(245, 189, 99, 0.26);
+}
+.tool-kind.execute {
+  color: var(--green);
+  background: var(--green-soft);
+  border-color: rgba(79, 224, 164, 0.24);
+}
+.tool-kind.delete {
+  color: var(--red);
+  background: var(--red-soft);
+  border-color: rgba(255, 133, 133, 0.26);
+}
+
+/* 标题就是一条命令/路径，等宽字体给它"可复制"的气质 */
+.tool-title {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-2);
+  letter-spacing: -0.005em;
+}
+
+.tool-status {
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  color: var(--t-text-faint);
+}
+.tool-status.done {
+  color: var(--green);
+}
+.tool-status.fail {
+  color: var(--red);
+}
+.tool-status.done::before,
+.tool-status.fail::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+}
+.tool-status:has(.spinner) {
+  color: var(--t-info);
+}
+
+.caret {
+  color: var(--t-text-faint);
+  font-size: 9px;
+  transition: transform var(--t-dur-2) var(--t-ease),
+    color var(--t-dur-1) var(--t-ease);
+}
+.tool-head:hover .caret {
+  color: var(--text-2);
+}
+
+.tool-body {
+  background: var(--t-sunken);
+  border-top: 1px solid var(--t-border-soft);
+}
+.tool-section-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  color: var(--t-text-faint);
+}
+.tool-pre {
+  font-family: var(--mono);
+  font-size: 11.8px;
+  line-height: 1.7;
+  color: #c2ccdb;
+  letter-spacing: -0.005em;
+}
+
+/* ═══ 8. 审批 / 思考 ═════════════════════════════════════════ */
+
+.approval {
+  border-color: rgba(245, 189, 99, 0.28);
+  background: linear-gradient(180deg, rgba(245, 189, 99, 0.09), rgba(245, 189, 99, 0.025));
+  border-radius: var(--t-r2);
+  box-shadow: inset 2.5px 0 0 0 var(--amber), var(--t-shadow-1);
+}
+.approval.resolved {
+  border-color: var(--t-border-soft);
+  background: rgba(255, 255, 255, 0.02);
+  box-shadow: none;
+}
+.approval-head {
+  color: var(--amber);
+  font-size: var(--t-fs-12);
+  font-weight: var(--t-w-semi);
+}
+.approval-body {
+  color: var(--text-2);
+  line-height: 1.65;
+}
+.approval-body code,
+.approval-line code {
+  font-family: var(--mono);
+  color: #dbe4f0;
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid var(--t-border-soft);
+  border-radius: var(--t-r1);
+}
+.approval-line {
+  color: var(--t-text-faint);
+  font-size: 11px;
+}
+
+/* 思考过程：从"表格"改成一条带状态的注记——紫色竖线 + 展开箭头 */
+.thought {
+  border-left: 2px solid rgba(154, 123, 255, 0.32);
+  padding-left: 13px;
+  transition: border-color var(--t-dur-1) var(--t-ease);
+}
+.thought:hover {
+  border-left-color: rgba(154, 123, 255, 0.55);
+}
+.thought-toggle {
+  font-size: 11.5px;
+  color: var(--t-text-faint);
+  letter-spacing: 0.02em;
+  transition: color var(--t-dur-1) var(--t-ease);
+}
+.thought-toggle:hover {
+  color: var(--text-2);
+}
+.thought-text {
+  color: var(--muted);
+  font-size: var(--t-fs-12);
+  line-height: 1.78;
+  font-style: normal;
+  border-radius: 0 var(--t-r1) var(--t-r1) 0;
+}
+
+.err {
+  border-color: rgba(255, 133, 133, 0.3);
+  background: linear-gradient(180deg, rgba(255, 133, 133, 0.12), rgba(255, 133, 133, 0.06));
+  color: #ffb8b8;
+  border-radius: var(--t-r2);
+  font-size: 12px;
+  line-height: 1.65;
+  box-shadow: inset 2.5px 0 0 0 var(--red);
+}
+
+.decision {
+  color: var(--t-text-faint);
+  font-size: 11px;
+}
+
+/* ═══ 9. 按钮 ═══════════════════════════════════════════════
+   统一 120ms；hover 提亮 + 描边变亮，:active 下沉 1px。 */
+
+.btn {
+  border-radius: 9px;
+  font-size: var(--t-fs-12);
+  font-weight: var(--t-w-semi);
+  color: var(--text-2);
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid var(--t-border-soft);
+  transition: color var(--t-dur-1) var(--t-ease),
+    background-color var(--t-dur-1) var(--t-ease),
+    border-color var(--t-dur-1) var(--t-ease),
+    transform var(--t-dur-1) var(--t-ease),
+    box-shadow var(--t-dur-1) var(--t-ease);
+}
+.btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.085);
+  border-color: var(--t-border-strong);
+}
+.btn:active {
+  transform: translateY(1px);
+  background: rgba(255, 255, 255, 0.06);
+}
+.btn:disabled {
+  opacity: 0.45;
+  transform: none;
+}
+
+/* 主按钮（实底 + 内高光）：和次按钮拉开一个数量级的差异 */
+.btn-primary {
+  color: #fff;
+  background: linear-gradient(145deg, #7396f7, #8b74f5);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 9px;
+  font-weight: var(--t-w-semi);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 6px 16px -10px rgba(123, 160, 255, 0.9);
+  transition: filter var(--t-dur-1) var(--t-ease),
+    transform var(--t-dur-1) var(--t-ease),
+    box-shadow var(--t-dur-1) var(--t-ease);
+}
+.btn-primary:hover {
+  filter: brightness(1.1);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    0 8px 20px -10px rgba(123, 160, 255, 1);
+}
+.btn-primary:active {
+  transform: translateY(1px);
+  filter: brightness(0.97);
+}
+.btn-primary:disabled {
+  filter: saturate(0.35) brightness(0.85);
+  opacity: 0.5;
+  transform: none;
+}
+
+/* 允许执行：语义绿实底 */
+.btn.allow {
+  color: #04160e;
+  background: linear-gradient(145deg, #57e8ae, #35c78c);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.35),
+    0 6px 16px -10px rgba(79, 224, 164, 0.9);
+}
+.btn.allow:hover {
+  filter: brightness(1.07);
+}
+
+/* 拒绝：只留描边，不跟主按钮抢注意力 */
+.btn.deny {
+  color: var(--red);
+  background: rgba(255, 133, 133, 0.06);
+  border-color: rgba(255, 133, 133, 0.36);
+}
+.btn.deny:hover {
+  background: var(--red-soft);
+  border-color: rgba(255, 133, 133, 0.55);
+}
+
+.btn.danger {
+  color: var(--red);
+  border-color: rgba(255, 133, 133, 0.34);
+  background: rgba(255, 133, 133, 0.07);
+}
+.btn.danger:hover {
+  background: var(--red-soft);
+}
+
+.btn.small {
+  border-radius: 8px;
+}
+
+.send {
+  border-radius: 9px;
+  font-size: var(--t-fs-12);
+  font-weight: var(--t-w-semi);
+  background: linear-gradient(145deg, #7396f7, #8b74f5);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    0 6px 16px -10px rgba(123, 160, 255, 0.9);
+  transition: filter var(--t-dur-1) var(--t-ease),
+    transform var(--t-dur-1) var(--t-ease),
+    box-shadow var(--t-dur-1) var(--t-ease);
+}
+.send:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+.send:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.send:disabled {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--t-text-faint);
+  box-shadow: none;
+}
+
+.stop {
+  border-radius: 9px;
+  color: var(--red);
+  border-color: rgba(255, 133, 133, 0.36);
+  background: var(--red-soft);
+  transition: background-color var(--t-dur-1) var(--t-ease),
+    transform var(--t-dur-1) var(--t-ease);
+}
+.stop:hover {
+  background: rgba(255, 133, 133, 0.2);
+}
+.stop:active {
+  transform: translateY(1px);
+}
+
+/* ═══ 10. 输入区 ═══════════════════════════════════════════ */
+
+.composer {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02));
+  border: 1px solid var(--t-border-strong);
+  border-radius: var(--t-r3);
+  box-shadow:
+    var(--t-shadow-3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transition: border-color var(--t-dur-1) var(--t-ease),
+    box-shadow var(--t-dur-1) var(--t-ease);
+}
+/* focus 双层环：外发光 + 内描边 */
+.composer:focus-within {
+  border-color: rgba(123, 160, 255, 0.65);
+  box-shadow:
+    0 0 0 3px rgba(123, 160, 255, 0.16),
+    0 0 24px -6px rgba(123, 160, 255, 0.35),
+    inset 0 0 0 1px rgba(123, 160, 255, 0.35),
+    var(--t-shadow-2);
+}
+.composer textarea {
+  font-size: var(--t-fs-13);
+  line-height: 1.68;
+  color: var(--text);
+}
+.composer textarea::placeholder {
+  color: var(--t-text-faint);
+}
+.composer-hint {
+  color: var(--t-text-faint);
+  font-size: 10.5px;
+  font-family: var(--mono);
+  letter-spacing: 0.02em;
+}
+
+/* 通用输入控件（登录页 / 设置页 / 管理后台） */
+.input,
+.select {
+  background: var(--t-sunken);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text);
+  transition: border-color var(--t-dur-1) var(--t-ease),
+    box-shadow var(--t-dur-1) var(--t-ease);
+}
+.input::placeholder {
+  color: var(--t-text-faint);
+}
+.input:focus,
+.select:focus {
+  border-color: rgba(123, 160, 255, 0.65);
+  box-shadow:
+    0 0 0 3px rgba(123, 160, 255, 0.14),
+    inset 0 0 0 1px rgba(123, 160, 255, 0.3);
+  outline: none;
+}
+.field-label {
+  color: var(--text-2);
+  font-size: var(--t-fs-12);
+  font-weight: var(--t-w-medium);
+}
+.field-hint {
+  color: var(--t-text-faint);
+}
+
+/* ═══ 11. 空状态 ═════════════════════════════════════════════ */
+
+.empty {
+  text-align: center;
+}
+/* 图标：终端提示符，用背景图拼，不新增 DOM */
+.empty::before {
+  content: "";
+  width: 46px;
+  height: 46px;
+  flex: none;
+  border-radius: var(--t-r3);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e8f0ff' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 7.5 9 12l-4.5 4.5'/%3E%3Cpath d='M12.5 16.5h7'/%3E%3C/svg%3E"),
+    linear-gradient(160deg, rgba(123, 160, 255, 0.26), rgba(154, 123, 255, 0.12));
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 24px 24px, cover;
+  border: 1px solid var(--t-accent-line);
+  box-shadow:
+    var(--t-inset-glow),
+    0 12px 30px -16px rgba(123, 160, 255, 0.8);
+}
+.empty h1 {
+  font-size: var(--t-fs-24);
+  font-weight: var(--t-w-bold);
+  line-height: var(--t-lh-24);
+  letter-spacing: -0.015em;
+  background: linear-gradient(115deg, #ffffff 12%, #c3d3ff 52%, #c7b4ff 96%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+.empty p {
+  color: var(--muted);
+  font-size: var(--t-fs-13);
+  line-height: 1.82;
+  letter-spacing: 0.004em;
+}
+/* 快捷键提示：如实反映 composer 的按键（Enter 发送 / Shift+Enter 换行） */
+.empty::after {
+  content: "Enter 发送　·　Shift + Enter 换行";
+  margin-top: -6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--t-text-faint);
+  letter-spacing: 0.02em;
+}
+
+.examples {
+  margin-top: 2px;
+}
+.example {
+  color: var(--text-2);
+  background: rgba(255, 255, 255, 0.026);
+  border: 1px solid var(--t-border-soft);
+  border-radius: var(--t-r2);
+  font-size: var(--t-fs-12);
+  line-height: 1.68;
+  transition: background-color var(--t-dur-1) var(--t-ease),
+    border-color var(--t-dur-1) var(--t-ease),
+    color var(--t-dur-1) var(--t-ease),
+    transform var(--t-dur-1) var(--t-ease),
+    box-shadow var(--t-dur-1) var(--t-ease);
+}
+.example:hover {
+  color: var(--text);
+  background: rgba(123, 160, 255, 0.08);
+  border-color: var(--t-accent-line);
+  transform: translateY(-1px);
+  box-shadow: var(--t-shadow-2);
+}
+.example .k {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+  color: var(--t-text-faint);
+}
+
+/* 空状态里的「新建会话」用的是 .btn.allow（绿），语义上是"允许执行"，
+   放在这里容易被读成"成功"——空状态的主行动统一回强调色。 */
+.empty .btn.allow {
+  color: #fff;
+  background: linear-gradient(145deg, #7396f7, #8b74f5);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--t-r2);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 8px 22px -12px rgba(123, 160, 255, 0.95);
+}
+.empty .btn.allow:hover {
+  filter: brightness(1.08);
+}
+
+/* ═══ 12. 加载态：点脉动 + 骨架微光 ═════════════════════════ */
+
+/* 不用转圈：一个呼吸的点，和状态色同源 */
+.spinner {
+  width: 6px;
+  height: 6px;
+  border: none;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 0 currentColor;
+  animation: t-dot-breathe 1.35s var(--t-ease) infinite;
+  vertical-align: middle;
+}
+@keyframes t-dot-breathe {
+  0%,
+  100% {
+    opacity: 0.35;
+    box-shadow: 0 0 0 0 currentColor;
+  }
+  50% {
+    opacity: 1;
+    box-shadow: 0 0 8px 1px currentColor;
+  }
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.035) 0%,
+    rgba(255, 255, 255, 0.085) 50%,
+    rgba(255, 255, 255, 0.035) 100%
+  );
+  background-size: 200% 100%;
+  border-radius: var(--t-r1);
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+/* ═══ 13. 浮层：面板 / 弹窗 / toast ═════════════════════════ */
+
+/* 面板与抽屉统一 180ms ease-out */
+.user-menu,
+.modal,
+.preview-card,
+.toast {
+  animation: t-pop var(--t-dur-2) var(--t-ease) both;
+}
+@keyframes t-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+/* toast 原本靠 translateX 居中，这里不能覆盖它的定位，单独淡入 */
+.toast {
+  animation: t-fade var(--t-dur-2) var(--t-ease) both;
+}
+@keyframes t-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.modal,
+.user-menu,
+.preview-card {
+  background: linear-gradient(180deg, #191d26, #14181f);
+  border: 1px solid var(--t-border-strong);
+  border-radius: var(--t-r3);
+  box-shadow: var(--t-shadow-3), var(--t-inset-glow);
+}
+.modal-head,
+.user-menu-head,
+.preview-head {
+  border-color: var(--t-border-soft);
+}
+.modal-head {
+  font-weight: var(--t-w-semi);
+}
+.user-menu-item {
+  border-radius: 8px;
+  transition: background-color var(--t-dur-1) var(--t-ease),
+    color var(--t-dur-1) var(--t-ease);
+}
+.user-menu-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.user-menu-item.danger:hover {
+  background: var(--red-soft);
+  color: var(--red);
+}
+.user-avatar {
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+.toast {
+  background: #1d222b;
+  border: 1px solid var(--t-border-strong);
+  color: var(--text);
+  border-radius: var(--t-r2);
+  font-size: var(--t-fs-12);
+  box-shadow: var(--t-shadow-3);
+}
+
+.preview {
+  background: rgba(4, 6, 9, 0.66);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+.preview-body,
+.tool-pre {
+  scrollbar-gutter: stable;
+}
+.preview-body {
+  background: var(--t-sunken);
+  color: #cfd8e6;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.72;
+}
+.preview-head {
+  font-family: var(--mono);
+  color: var(--text-2);
+}
+
+/* ═══ 14. 文件面板 / 登录 / 管理后台（沿用同一套 token） ════ */
+
+.files {
+  border-left: 1px solid var(--t-border-soft);
+  background: linear-gradient(180deg, rgba(18, 22, 30, 0.9), rgba(10, 12, 17, 0.95));
+}
+.files-head {
+  border-bottom-color: var(--t-border-soft);
+  color: var(--text-2);
+  font-weight: var(--t-w-medium);
+}
+.crumbs {
+  color: var(--t-text-faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+.crumbs button:hover {
+  color: var(--accent);
+}
+.file-row {
+  border-radius: 8px;
+  color: var(--text-2);
+  transition: background-color var(--t-dur-1) var(--t-ease),
+    color var(--t-dur-1) var(--t-ease);
+}
+.file-row:hover {
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text);
+}
+.file-row .sz {
+  color: var(--t-text-faint);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.files-empty {
+  color: var(--t-text-faint);
+  font-size: var(--t-fs-12);
+  line-height: 1.75;
+}
+
+.login-card,
+.setup-card,
+.card {
+  background: linear-gradient(180deg, #171b23, #11141a);
+  border: 1px solid var(--t-border-strong);
+  border-radius: var(--t-r4);
+  box-shadow: var(--t-shadow-3), var(--t-inset-glow);
+}
+.login-title,
+.setup-title,
+.page-title {
+  color: #fff;
+  font-weight: var(--t-w-bold);
+  letter-spacing: -0.01em;
+}
+.login-sub,
+.page-sub,
+.setup-hint {
+  color: var(--muted);
+  line-height: 1.7;
+}
+.seg {
+  background: var(--t-sunken);
+  border-radius: var(--t-r2);
+  border-color: var(--border);
+}
+.seg-item {
+  border-radius: 8px;
+  color: var(--muted);
+  transition: color var(--t-dur-1) var(--t-ease),
+    background-color var(--t-dur-1) var(--t-ease);
+}
+.seg-item.on {
+  color: var(--text);
+  background: rgba(123, 160, 255, 0.16);
+  box-shadow: inset 0 0 0 1px var(--t-accent-line);
+}
+.notice {
+  border-radius: var(--t-r2);
+  box-shadow: inset 2.5px 0 0 0 currentColor;
+}
+.notice.info {
+  color: var(--t-info);
+  background: var(--t-info-soft);
+  border-color: rgba(107, 182, 255, 0.28);
+}
+.notice.warn {
+  color: var(--amber);
+  background: var(--amber-soft);
+  border-color: rgba(245, 189, 99, 0.28);
+}
+.notice.error {
+  color: var(--red);
+  background: var(--red-soft);
+  border-color: rgba(255, 133, 133, 0.3);
+}
+
+.tbl th {
+  color: var(--t-text-faint);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--t-border-soft);
+}
+.tbl td {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.035);
+  color: var(--text-2);
+}
+.tbl tbody tr:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.stat {
+  border-radius: var(--t-r2);
+  background: rgba(255, 255, 255, 0.028);
+  border: 1px solid var(--t-border-soft);
+}
+.stat-v {
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+.stat-k {
+  color: var(--t-text-faint);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.tag {
+  border-radius: var(--t-r1);
+  border: 1px solid var(--t-border-soft);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-2);
+  font-size: 10.5px;
+}
+.dot-tag.ok {
+  color: var(--green);
+}
+.dot-tag.off {
+  color: var(--t-text-faint);
+}
+.boot {
+  color: var(--muted);
+}
+
+/* ═══ 15. 动效收敛 ═══════════════════════════════════════════
+   全部动画 ≤ 250ms，无旋转、无弹跳。系统开了"减少动态效果"就一律关掉。 */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .turn {
+    animation: none !important;
+  }
+}
+
+/* ═══ 16. 小屏补偿 ═══════════════════════════════════════════
+   只调字号相关（布局断点由 styles.css 负责）。 */
+
+@media (max-width: 760px) {
+  .msg-user,
+  .msg-assistant {
+    font-size: 14.5px;
+    line-height: 1.7;
+  }
+  .msg-assistant {
+    padding: var(--t-s2) 13px;
+  }
+  .md p,
+  .md li {
+    line-height: 1.72;
+  }
+  .md pre code {
+    font-size: 11.8px;
+  }
+  .empty::before {
+    width: 40px;
+    height: 40px;
+    background-size: 20px 20px, cover;
+  }
+  .empty h1 {
+    font-size: 20px;
+    line-height: 1.32;
+  }
+  .empty::after {
+    font-size: 10px;
+  }
+  .tool-pre {
+    font-size: 11.4px;
+  }
+  .composer textarea {
+    font-size: 15px; /* iOS 小于 16px 会触发聚焦缩放，这里取 15 且不缩放由 viewport 兜底 */
+  }
+}
+
+/* ═══ 17. 会话检索 / 置顶 / 消息操作 / 连接状态 ═══════════════
+   布局尺寸在 styles.css，这里只给新组件上色。取色沿用既有 token：
+   浮层用 elevated（--elev），列表项选中用 accent-soft，警告用 amber，
+   断开用 red——和审批卡、运行状态 pill 是同一套语义色。 */
+
+/* ── 搜索面板 ── */
+
+.palette-mask {
+  background: rgba(5, 7, 11, 0.62);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+.palette-mask.full {
+  background: var(--bg);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.palette {
+  background: var(--elev);
+  border: 1px solid var(--t-border-strong);
+  border-radius: var(--t-r3);
+  box-shadow: var(--t-shadow-3), var(--t-inset-glow);
+  color: var(--text);
+}
+.palette.full {
+  border: none;
+  box-shadow: none;
+}
+
+.palette-search {
+  border-bottom-color: var(--t-border-soft);
+}
+.palette-input::placeholder {
+  color: var(--t-text-faint);
+}
+.palette-clear {
+  color: var(--t-text-faint);
+  transition: color var(--t-dur-1) var(--t-ease),
+    background-color var(--t-dur-1) var(--t-ease);
+}
+.palette-clear:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+.palette-cancel {
+  color: var(--accent);
+  font-weight: var(--t-w-medium);
+}
+
+.palette-item {
+  color: var(--text-2);
+  transition: background-color var(--t-dur-1) var(--t-ease);
+}
+.palette-item.sel {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--t-accent-line);
+}
+/* 选中项的标题提亮；未选中的标题已经是 --text，靠底色区分就够了 */
+.palette-item.sel .palette-item-title {
+  color: var(--text);
+}
+.palette-item-title {
+  color: var(--text);
+  font-weight: var(--t-w-medium);
+}
+.palette-item-sum {
+  color: var(--muted);
+}
+.palette-item-sum.loading {
+  color: var(--t-text-faint);
+  font-style: normal;
+  opacity: 0.75;
+}
+
+/* 命中片段：不用浏览器默认的那块亮黄（在暗色底上像故障），
+   改成强调色的半透明底 + 提亮文字，和整套强调色一致。 */
+.palette mark {
+  background: rgba(123, 160, 255, 0.3);
+  color: #eaf2ff;
+  border-radius: 3px;
+  padding: 0 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.palette-pin {
+  color: var(--accent);
+}
+.palette-item-cur {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--t-border-soft);
+  color: var(--t-text-faint);
+}
+
+.palette-empty-title {
+  color: var(--text-2);
+  font-weight: var(--t-w-medium);
+}
+.palette-empty-hint {
+  color: var(--muted);
+}
+
+.palette-foot {
+  border-top-color: var(--t-border-soft);
+  color: var(--t-text-faint);
+}
+
+kbd {
+  background: var(--t-sunken-2);
+  border-color: var(--t-border-soft);
+  color: var(--text-2);
+}
+
+/* ── 连接状态 ── */
+
+.conn-bar.warn {
+  color: var(--amber);
+  background: var(--amber-soft);
+  border-bottom-color: rgba(245, 189, 99, 0.26);
+}
+.conn-bar.bad {
+  color: var(--red);
+  background: var(--red-soft);
+  border-bottom-color: rgba(255, 133, 133, 0.3);
+}
+.conn-bar-track {
+  background: rgba(255, 255, 255, 0.09);
+}
+.conn-bar.warn .conn-bar-fill {
+  background: var(--amber);
+  animation: conn-sweep 1.5s var(--t-ease) infinite;
+}
+.conn-bar.bad .conn-bar-fill {
+  background: var(--red);
+  /* 断了就不再假装「正在跑」：静态一段，把注意力留给右边的按钮 */
+  width: 100%;
+  opacity: 0.55;
+}
+@keyframes conn-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(230%);
+  }
+}
+.conn-bar-btn {
+  color: inherit;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid currentColor;
+  border-color: rgba(255, 255, 255, 0.14);
+  transition: background-color var(--t-dur-1) var(--t-ease);
+}
+.conn-bar-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.conn-pill.warn {
+  color: var(--amber);
+  background: var(--amber-soft);
+  border: 1px solid rgba(245, 189, 99, 0.3);
+}
+.conn-pill.bad {
+  color: var(--red);
+  background: var(--red-soft);
+  border: 1px solid rgba(255, 133, 133, 0.34);
+}
+.conn-pill-dot {
+  background: currentColor;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.05);
+}
+.conn-pill.warn .conn-pill-dot {
+  animation: pulse 1.4s infinite;
+}
+
+/* ── 置顶 ── */
+
+.session-pin {
+  color: var(--accent);
+  opacity: 0.9;
+}
+/* 已置顶的图钉按钮保持高亮：侧栏里一眼能看出这一项处在置顶状态，
+   而不是要去读 title。 */
+.mini-btn.on {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.mini-btn.on:hover {
+  color: var(--t-accent-hover);
+  background: rgba(123, 160, 255, 0.2);
+}
+
+/* ── 消息操作条 ──
+   浮在气泡上方时需要一点底，否则按钮图标会和正文/上一条消息糊在一起。 */
+.msg-actions {
+  padding: 1px;
+  border-radius: var(--t-r1);
+  background: rgba(18, 21, 28, 0.86);
+  border: 1px solid var(--t-border-soft);
+  box-shadow: var(--t-shadow-2);
+  transition: opacity var(--t-dur-1) var(--t-ease);
+}
+/* 13px 的图标用最淡那档灰在浮层底上几乎看不见，提一档 */
+.msg-actions .mini-btn {
+  color: var(--text-2);
+}
+/* 触屏展开后是文档流里的一条，去掉浮层底，只留按钮本身 */
+@media (hover: none) {
+  .msg-actions {
+    background: none;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+  }
+  /* 44×44 的命中区里只有 13px 的图标，长按后不给底会看不出「这里能点」 */
+  .msg-row.revealed .mini-btn {
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: var(--t-r2);
+    color: var(--text-2);
+  }
+}
+
+/* ── 空态示例卡：可点了，给一个「能按」的反馈 ── */
+.example {
+  transition: border-color var(--t-dur-1) var(--t-ease),
+    background-color var(--t-dur-1) var(--t-ease),
+    color var(--t-dur-1) var(--t-ease);
+}
+.example .k {
+  color: var(--t-text-faint);
+}
+.empty-hint {
+  color: var(--t-text-faint);
+}
+
+/* ── 对比度实测（WCAG 2.1 相对亮度公式，脚本算的，不是估的） ──
+   canvas #0b0d12 / surface #12151c / elevated #181c25
+   --text   #eef2f9  17.31 / 16.27 / 15.19   ≥7:1 ✓ 正文
+   --text-2 #b9c3d4  10.94 / 10.28 /  9.60   ≥7:1 ✓ 次要
+   --muted  #8e99ac   6.76 /  6.35 /  5.93   ≥4.5:1 ✓ 三级
+   faint    #7b8798   5.35 /  5.02 /  4.69   ≥4.5:1 ✓ 占位/时间戳
+   accent   #7ba0ff   7.69 /  7.23 /  6.75   ≥4.5:1 ✓ 链接
+   green    #4fe0a4  11.60 / 10.90 / 10.17   ≥4.5:1 ✓
+   amber    #f5bd63  11.42 / 10.73 / 10.02   ≥4.5:1 ✓
+   red      #ff8585   8.28 /  7.78 /  7.26   ≥4.5:1 ✓
+   用户气泡底 #1a2233 上正文 14.16:1 ✓
+
+   叠色后再算一遍（半透明底是叠出来的，不能只看 token 值）：
+   agent 卡片（#0b0d12 + 白 5% → #17191e）：正文 15.66:1，次要 9.90:1，三级 6.11:1
+   用户气泡（#0b0d12 + 强调色 24% → #26304b）：正文 12.20:1
+   工具输出区（#0a0d13）上的等宽文字 #c2ccdb：12.00:1
+   输入框 placeholder（#7b8798）在 composer 底上：5.05:1（≥4.5，且明显弱于正文）
+*/
+
+/* ═══ 文件面板：把产出拿到手 ═══════════════════════════════════
+   这一块只调「看起来能点、点下去有反馈」：缩略图的空态底、菜单的浮起感、
+   进度条的方向感。布局（网格列数、行高、命中区）都在 styles.css。 */
+
+/* 面板在 ≤1023 时是浮层（平板右侧抽屉 / 手机整屏）。主题里原本给的是
+   半透明渐变——放在三栏布局里很轻，可一旦盖在消息上，底下每个字都会透出来，
+   看起来像渲染残影。浮层形态必须是实底。 */
+@media (max-width: 1023px) {
+  .files {
+    background: linear-gradient(180deg, #12161e 0%, #0a0c11 100%);
+  }
+}
+
+/* 计数是个 chip 而不是纯文字：它要跟右边的图标按钮区分开层级 */
+.files-count {
+  color: var(--t-text-faint);
+  background: rgba(255, 255, 255, 0.035);
+  border-color: var(--t-border-soft);
+}
+
+.crumb {
+  transition: color var(--t-dur-1) var(--t-ease),
+    background-color var(--t-dur-1) var(--t-ease);
+}
+.crumb:hover {
+  background: rgba(255, 255, 255, 0.045);
+}
+.crumb.current {
+  color: var(--text);
+}
+
+/* 文件行：hover 只换底不换字重，避免列表在指针扫过时抖动 */
+.file-row {
+  transition: background-color var(--t-dur-1) var(--t-ease),
+    color var(--t-dur-1) var(--t-ease);
+}
+.file-row.is-busy {
+  background: var(--t-accent-softer);
+  /* 进度条的「轨道」：只有一根短蓝条时看不出还剩多少，加一条极淡的底线，
+     进度条才有「走到哪了」的参照。 */
+  box-shadow: inset 0 -2px 0 rgba(123, 160, 255, 0.16);
+}
+
+.row-act {
+  transition: opacity var(--t-dur-1) var(--t-ease),
+    background-color var(--t-dur-1) var(--t-ease),
+    color var(--t-dur-1) var(--t-ease);
+}
+
+/* 进度条用强调色渐变：单色细线在深底上太像分割线 */
+.file-bar {
+  background: linear-gradient(90deg, var(--accent) 0%, var(--accent-2) 100%);
+  box-shadow: 0 0 8px rgba(123, 160, 255, 0.45);
+}
+
+/* 缩略图：空态给一层极淡的斜纹，比纯黑更能说明「这里会有图」 */
+.thumb-box {
+  background: linear-gradient(135deg, #0c1017 0%, #101521 100%);
+  border-color: var(--t-border-soft);
+  transition: border-color var(--t-dur-1) var(--t-ease),
+    box-shadow var(--t-dur-1) var(--t-ease);
+}
+.thumb:hover .thumb-box {
+  border-color: var(--t-accent-line);
+  box-shadow: 0 0 0 3px var(--t-accent-softer);
+}
+.thumb-name {
+  color: var(--t-text-faint);
+}
+.thumb:hover .thumb-name {
+  color: var(--text-2);
+}
+.thumb-loading {
+  color: var(--t-text-faint);
+}
+
+.files-label {
+  color: var(--t-text-faint);
+}
+
+/* 菜单：浮起一层 elevation + 轻微入场，长按弹出的东西必须有「刚出现」的感觉 */
+.file-menu {
+  background: rgba(24, 28, 37, 0.97);
+  backdrop-filter: blur(10px);
+  border-color: var(--t-border-strong);
+  box-shadow: var(--t-shadow-3, 0 18px 44px rgba(0, 0, 0, 0.55));
+  animation: file-menu-in 0.11s var(--t-ease);
+}
+@keyframes file-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.file-menu button svg {
+  color: var(--muted);
+}
+.file-menu button:hover svg {
+  color: var(--accent);
+}
+
+/* 灯箱：整幅画面压到几乎全黑，图片本身是唯一的亮部 */
+.lightbox {
+  background: radial-gradient(120% 120% at 50% 0%, rgba(16, 21, 33, 0.96) 0%, rgba(3, 5, 8, 0.98) 65%);
+  animation: lightbox-in 0.14s var(--t-ease);
+}
+@keyframes lightbox-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.lightbox-img {
+  filter: drop-shadow(0 18px 50px rgba(0, 0, 0, 0.6));
+}
+.lightbox-name {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.preview-dl {
+  border-color: var(--t-accent-line);
+  background: var(--t-accent-softer);
+  transition: background-color var(--t-dur-1) var(--t-ease);
+}
+.preview-dl:hover {
+  background: var(--accent-soft);
+}
+.preview-binary svg {
+  color: var(--t-text-faint);
+}
