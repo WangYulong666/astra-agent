@@ -46,7 +46,22 @@ jobs:
       - name: go test
         env:
           TZ: Asia/Shanghai
-        run: go test ./cmd/... ./internal/... -count=1 -timeout 600s
+        run: |
+          set -o pipefail
+          if go test ./cmd/... ./internal/... -count=1 -timeout 600s 2>&1 | tee /tmp/gotest.log; then
+            exit 0
+          fi
+          # 失败时把失败用例做成 annotation。理由：job log 要 admin 权限才能下载，
+          # 而 public 仓库的 annotations 匿名可读——CI 红的时候不必有人专门去网页翻。
+          echo "::error::go test 失败，失败用例见下（完整日志在 job log）"
+          grep -E "^--- FAIL|^    --- FAIL" /tmp/gotest.log | head -15 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          # 失败用例后面紧跟的那行错误信息通常最有价值（文件:行号 + 原因）
+          grep -E "\.go:[0-9]+: " /tmp/gotest.log | head -15 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          exit 1
 
       # ⚠️ 本机 npmrc 指向 registry.npmmirror.com，lock 里的 resolved 也全绑在这个镜像上。
       # GitHub runner 在境外，拉镜像会超时/5xx——这是「本地全绿、CI 必红」的典型成因。

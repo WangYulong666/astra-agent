@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -85,6 +86,12 @@ func TestDSHStatus_DirectoryNotOK(t *testing.T) {
 
 // 用例 6：备份 rsync 排除 sandboxes 且产物是合法 zip。
 func TestBackupDataTo(t *testing.T) {
+	// ditto 是 macOS 命令（保留资源分叉与扩展属性，这正是桌面端打包备份要的）。
+	// Linux/CI 上它不存在，exec 直接返回 "executable file not found"——
+	// 以前没判平台，ubuntu runner 上这条必红，而本地 macOS 永远看不出来。
+	if runtime.GOOS != "darwin" {
+		t.Skip("ditto 仅 macOS 可用；备份功能属于桌面端（macOS）")
+	}
 	src := t.TempDir()
 	for _, f := range []string{"sqlite.db", "sessions/a.json"} {
 		p := filepath.Join(src, f)
