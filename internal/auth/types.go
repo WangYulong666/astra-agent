@@ -93,7 +93,7 @@ var permissions = map[string]map[Action]bool{
 		ActionSandboxRead: true, ActionSandboxManage: true,
 		ActionKeyManage: true, ActionUserManage: true,
 		ActionUsageRead: true, ActionUsageReadAll: true,
-		ActionAuditRead: true,
+		ActionAuditRead:  true,
 		ActionMemoryRead: true, ActionMemoryWrite: true, ActionObsRead: true,
 		// 没有 ActionTenantManage：管理员不能改租户本身（额度、停用、删除）。
 	},

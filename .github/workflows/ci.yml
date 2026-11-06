@@ -32,6 +32,11 @@ jobs:
           if [ -n "$files" ]; then
             echo "以下文件未 gofmt："
             echo "$files"
+            # 同样做成 annotation（job log 要 admin 权限，annotation 匿名可读）。
+            # path 去掉 ./ 前缀：GitHub 的 annotation 要的是仓库相对路径。
+            echo "$files" | head -15 | while IFS= read -r f; do
+              echo "::error file=${f#./}::未 gofmt，本地执行 gofmt -w ${f#./}"
+            done
             exit 1
           fi
 
