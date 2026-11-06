@@ -17,6 +17,8 @@ export const ROUTES = [
   '/admin/observability',
   '/admin/memory',
   '/admin/skills',
+  // 用户视角行动账本
+  '/admin/activity',
   '/admin/tenants',
   '/admin/settings',
 ] as const

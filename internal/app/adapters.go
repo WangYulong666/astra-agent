@@ -12,6 +12,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/WangYulong666/astra-agent/internal/activity"
@@ -102,8 +103,16 @@ func (a tokenAdapter) TokenFor(ctx context.Context, tid, uid, host string) (stri
 		return "", "", false, nil
 	}
 	tok, err := a.mgr.TokenFor(ctx, tid, uid, c.Name)
-	if err != nil || tok == "" {
+	if err != nil {
+		// 「该用户没连过」是正常业务状态，不是系统故障：sidecar 要回 401
+		// 让 agent 去授权，而不是回 502 让人去查日志。
+		if errors.Is(err, connector.ErrNotConnected) {
+			return "", "", false, nil
+		}
 		return "", "", false, err
+	}
+	if tok == "" {
+		return "", "", false, nil
 	}
 	header := c.AuthHeader
 	if header == "" {
@@ -145,8 +154,8 @@ func (a sessionsAdapter) CreateSession(ctx context.Context, o collab.CreateOpts)
 	return collab.SessionInfo{ID: s.ID}, nil
 }
 
-func (a sessionsAdapter) StartRun(ctx context.Context, sid, input string) (collab.RunInfo, error) {
-	r, err := a.mgr.StartRun(ctx, sid, input)
+func (a sessionsAdapter) StartRun(ctx context.Context, sid, input, parentRunID string) (collab.RunInfo, error) {
+	r, err := a.mgr.StartRunWithParent(ctx, sid, input, parentRunID)
 	if err != nil {
 		return collab.RunInfo{}, err
 	}

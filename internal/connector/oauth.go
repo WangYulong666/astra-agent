@@ -144,6 +144,7 @@ func (m *manager) Exchange(ctx context.Context, tenantID, userID, name, code, re
 	if err := m.vault.set(cred); err != nil {
 		return Credential{}, err
 	}
+	m.invalidateTokenCache(tenantID, userID, name)
 	// 返回值不回 token：上层（回调页）只需要名字，凭据只该被使用、不该被读取。
 	cred.Token = ""
 	cred.Refresh = ""
@@ -201,6 +202,8 @@ func (m *manager) refresh(ctx context.Context, tenantID, userID, name string, cr
 	if err := m.vault.set(next); err != nil {
 		return Credential{}, err
 	}
+	// refresh 也可能由 Inject(env) 触发；让 TokenFor 缓存失效，避免继续用旧 token。
+	m.invalidateTokenCache(tenantID, userID, name)
 	return next, nil
 }
 

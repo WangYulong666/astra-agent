@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"net"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -69,6 +71,10 @@ type meta struct {
 	State     State     `json:"state"`
 	// Strict 记录创建时是否启用了 sandbox-exec，Resume 要沿用同一设置。
 	Strict bool `json:"strict"`
+	// NetworkPolicy 出网强制边界。必须落盘：Resume 只用
+	// spawn(s.m, AgentSpec{Command: s.m.Agent}) 重启，不带 Env/新字段，
+	// 只放内存会在 pause→resume 后静默失效，等于安全边界自己消失。
+	NetworkPolicy *NetworkPolicy `json:"network_policy,omitempty"`
 }
 
 // 只允许这些字符做 ID。这不是洁癖：ID 直接拼进文件路径，
@@ -176,6 +182,12 @@ func (l *Local) Create(ctx context.Context, req CreateRequest) (Sandbox, error) 
 		if len(req.Agent.Command) > 0 {
 			old.Agent = req.Agent.Command
 		}
+		// 复用旧 meta 时：显式传了新网络策略就更新，否则沿用落盘的旧值。
+		// 沿用旧值是刻意的 fail-closed——Resume / 二次 Create 漏传 policy 时，
+		// 已启用的出网边界不会因为一次空请求而消失。spawn 始终以 old（meta）为准。
+		if req.Agent.NetworkPolicy != nil {
+			old.NetworkPolicy = req.Agent.NetworkPolicy
+		}
 		old.State = StateRunning
 
 		// 重启用合并后的 spec：调用方没传 agent 命令时沿用 meta 里记的，
@@ -237,6 +249,8 @@ func (l *Local) Create(ctx context.Context, req CreateRequest) (Sandbox, error) 
 		CreatedAt: time.Now(),
 		State:     StateRunning,
 		Strict:    l.strictFor(spec),
+		// 出网强制边界随 meta 一起落盘，Resume 才能沿用（见 meta 字段注释）。
+		NetworkPolicy: spec.NetworkPolicy,
 	}
 
 	cmd, err := l.spawn(m, spec)
@@ -281,17 +295,12 @@ func (l *Local) spawn(m *meta, agent AgentSpec) (*exec.Cmd, error) {
 		proxyArgs = append(proxyArgs, "-agent", argLine)
 	}
 
-	name, args := proxy, proxyArgs
 	// m.Strict 在 Create 时已经算好：strictAvailable() && !spec.SelfSandbox。
 	// agent 自带沙箱时这里**故意**不套 sandbox-exec：macOS 的 sandbox_apply 在
 	// 已被沙箱化的进程里直接返回 Operation not permitted，沙箱不能嵌套——
 	// 外层再套一层会让 agent 的每条命令都失败。强制边界只能有一层，
-	// 由谁提供见 AgentSpec.SelfSandbox。
-	if m.Strict {
-		name = "sandbox-exec"
-		args = append([]string{"-p", l.profile(m), proxy}, proxyArgs...)
-	}
-
+	// 由谁提供见 AgentSpec.SelfSandbox。命令构造见 spawnCommand。
+	name, args := l.spawnCommand(m, proxy, proxyArgs)
 	cmd := exec.Command(name, args...)
 	cmd.Dir = m.Workspace
 	cmd.Env = l.childEnv(m, agent)
@@ -336,6 +345,22 @@ func (l *Local) spawn(m *meta, agent AgentSpec) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
+// spawnCommand 决定要不要套 sandbox-exec、以及用哪个 profile 启动 acp-proxy。
+//
+// 这是「出网强制边界跟随 m.Strict」的唯一落点：m.Strict=false 时
+// （ASTRA_NO_SEATBELT 非空 / sandbox-exec 不存在 / SelfSandbox=true）
+// 根本不调用 profile，网络规则整体不生效——不需要给网络层单独做开关或绕过，
+// 也就不会出现「写限制照常、出网限制单独被绕过」的缝隙。
+//
+// 抽成纯函数（无进程副作用）是为了能被单测直接锁住这条边界：
+// 断言 strict 不可用时最终命令里既没有 -p 也没有 (deny network*)。
+func (l *Local) spawnCommand(m *meta, proxy string, proxyArgs []string) (string, []string) {
+	if m.Strict {
+		return "sandbox-exec", append([]string{"-p", l.profile(m), proxy}, proxyArgs...)
+	}
+	return proxy, proxyArgs
+}
+
 // childEnv 构造 agent 的环境。核心是把 HOME 搬进沙箱目录：
 // 这样 node/npm 的缓存、dsh 的配置与凭据全部落在沙箱内，互不污染。
 func (l *Local) childEnv(m *meta, agent AgentSpec) []string {
@@ -378,6 +403,92 @@ func (l *Local) profile(m *meta) string {
 		b.WriteString(fmt.Sprintf(" (subpath %q)", p))
 	}
 	b.WriteString(")\n")
+	// 出网强制边界：Enabled=false 时到此为止，与未启用本能力时逐字节相同
+	// （原有 TestProfileCoversWorkspaceOnly 及逐字节兼容单测都依赖这一点）。
+	if np := m.NetworkPolicy; np != nil && np.Enabled {
+		b.WriteString(networkRules(np))
+	}
+	return b.String()
+}
+
+// sbplAddr 校验 "host:port" 并返回可用于 SBPL 的端口部分。
+//
+// 为什么生成时不照抄 host：macOS 26 的 Seatbelt ip/tcp filter 里 "network address"
+// 的 host 只接受 "*" 或 "localhost"，写数字 IP 会直接编译失败：
+//
+//	sandbox-exec: host must be * or localhost in network address
+//	sandbox-exec: port missing in network address: 127.0.0.1
+//
+// 这是在本机 macOS 26.2 用 /usr/bin/sandbox-exec 逐个 form 实测的，不是查文档猜的。
+// 因此把 host 统一归一化为 localhost（networkRules 里拼 "localhost:<port>"），
+// 即「只放行本机回环的该端口」——正好是「强制所有出网走本机代理」的语义。
+// 用 "*" 会放行任意 IP 的该端口（外部主机也放行），过宽，不用。
+//
+// 校验本身也是 SBPL 注入防线：地址最终会被拼进 (remote ip "...")，
+// 任何能闭合字符串 / form 的字符都拒绝，非法值由调用方忽略并记日志。
+// 非回环的合法 IP 虽通过校验，归一化后也只放行回环端口（fail-closed，不会意外放开外网）。
+func sbplAddr(addr string) (port string, ok bool) {
+	// 白名单：合法地址只含这些字符。空格、引号、括号、分号、换行等一律拒绝。
+	const safe = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.:[]*"
+	for _, r := range addr {
+		if !strings.ContainsRune(safe, r) {
+			return "", false
+		}
+	}
+	host, p, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", false
+	}
+	// IPv6 带方括号时 SplitHostPort 已去掉括号，这里再兜一层防御。
+	bare := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	// host 必须是回环别名或合法数值 IP；不接受域名（Seatbelt 按 IP 匹配，
+	// 域名无意义且会绕过代理的域名策略）。
+	if bare != "localhost" && net.ParseIP(bare) == nil {
+		return "", false
+	}
+	if p != "*" {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 1 || n > 65535 {
+			return "", false
+		}
+	}
+	return p, true
+}
+
+// networkRules 生成「出网强制边界」的 SBPL 顶层 form，追加在写限制收口之后。
+//
+// SBPL 是 last-match-wins：deny 必须在前，具体 allow 在后；不同 operation 必须
+// 拆成独立 form——写成 (allow network* (local ip ...)(remote ip ...)) 会因为
+// local ip 匹配未绑定 outbound socket 而把外部出网重新放开（社区实测过的坑）。
+//
+// 真机（macOS 26.2）语法依据：
+//   - (deny network*)                              编译通过
+//   - (remote ip "localhost:17890")              编译通过；数字 IP 写法编译失败
+//   - (remote ip "localhost:*") / (local ip ...) 编译通过；必须带 :port
+//   - (allow network-outbound (remote unix-socket)) 编译通过（DNS / mDNSResponder）
+func networkRules(np *NetworkPolicy) string {
+	var b strings.Builder
+	b.WriteString("(deny network*)\n")
+	if port, ok := sbplAddr(np.ProxyAddr); ok {
+		b.WriteString(fmt.Sprintf("(allow network-outbound (remote ip %q))\n", "localhost:"+port))
+	} else {
+		log.Printf("sandbox: 忽略非法 NetworkPolicy.ProxyAddr %q（仅接受 host:port，防 SBPL 注入）", np.ProxyAddr)
+	}
+	// DNS / mDNSResponder：域名解析走本机 unix-socket。不放行会 "Could not resolve host"，
+	// agent 连「连接被拒」都得不到，等于把诊断信息也一起掐了。
+	b.WriteString("(allow network-outbound (remote unix-socket))\n")
+	// 控制面连 acp-proxy（inbound）+ acp-proxy 自己监听（bind），限回环。
+	// 独立 operation、独立 form，不与 remote 拼在一起（见函数注释）。
+	b.WriteString("(allow network-inbound (local ip \"localhost:*\"))\n")
+	b.WriteString("(allow network-bind (local ip \"localhost:*\"))\n")
+	for _, a := range np.ExtraAllow {
+		port, ok := sbplAddr(a)
+		if !ok {
+			log.Printf("sandbox: 忽略非法 NetworkPolicy.ExtraAllow 项 %q（仅接受 host:port，防 SBPL 注入）", a)
+			continue
+		}
+		b.WriteString(fmt.Sprintf("(allow network-outbound (remote ip %q))\n", "localhost:"+port))
+	}
 	return b.String()
 }
 

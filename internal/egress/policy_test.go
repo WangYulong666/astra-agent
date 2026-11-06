@@ -63,19 +63,22 @@ func TestDecideHostFirstMatchWins(t *testing.T) {
 	}
 }
 
-func TestDecideHostAskFallsBackToDeny(t *testing.T) {
+func TestDecideHostAskReturnsAsk(t *testing.T) {
 	pol := Policy{
 		Default: Deny,
 		Rules:   []Rule{{Pattern: "ask.example.com", Decision: Ask}},
 	}
 	dec, reason := decideHost(pol, "ask.example.com")
-	if dec != Deny || reason != "ask-unsupported" {
-		t.Errorf("Ask 规则 = (%s, %s), want (deny, ask-unsupported)", dec, reason)
+	if dec != Ask || reason != "rule:ask.example.com" {
+		t.Errorf("Ask 规则 = (%s, %s), want (ask, rule:ask.example.com)", dec, reason)
 	}
+}
 
+func TestDecideHostDefaultAsk(t *testing.T) {
 	defAsk := Policy{Default: Ask}
-	if dec, reason := decideHost(defAsk, "whatever.example"); dec != Deny || reason != "ask-unsupported" {
-		t.Errorf("Ask 默认 = (%s, %s), want (deny, ask-unsupported)", dec, reason)
+	dec, reason := decideHost(defAsk, "whatever.example")
+	if dec != Ask || reason != "default" {
+		t.Errorf("Ask 默认 = (%s, %s), want (ask, default)", dec, reason)
 	}
 }
 

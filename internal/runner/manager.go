@@ -67,6 +67,10 @@ type Config struct {
 	// 本地开发若 agent 通过 127.0.0.1 的 LLM 网关取模型，必须把该地址
 	// 填进来，否则代理的私网拦截会把网关一起挡掉（默认 deny）。
 	EgressBypass string
+	// NetworkLock 打开 Seatbelt 的「只准连本机出网代理」规则。
+	// 默认 false：规则写错或代理没起会让所有 agent 断网，必须由部署方显式开启。
+	// 只在 Egress 已启用时生效，否则 app 层会忽略并告警。
+	NetworkLock bool
 }
 
 // Manager 管理全部会话。并发安全。
@@ -194,6 +198,22 @@ func (m *Manager) CreateSession(ctx context.Context, opts CreateSessionOptions) 
 	if m.cfg.Egress != nil && m.cfg.Egress.Enabled() {
 		spec.Env = mergeEnv(spec.Env, egress.EnvForWithBypass(
 			m.cfg.Egress.Addr(), id, newNonce(), m.cfg.EgressBypass))
+
+		// 双层出网边界：代理管「哪些域名能出去」，Seatbelt 管「只能连代理」。
+		// EGRESS_NO_PROXY 里的本机地址也要放行，否则 LLM 网关会被一起挡掉。
+		if m.cfg.NetworkLock {
+			var extra []string
+			for _, a := range strings.Split(m.cfg.EgressBypass, ",") {
+				if a = strings.TrimSpace(a); a != "" {
+					extra = append(extra, a)
+				}
+			}
+			spec.NetworkPolicy = &sandbox.NetworkPolicy{
+				Enabled:    true,
+				ProxyAddr:  m.cfg.Egress.Addr(),
+				ExtraAllow: extra,
+			}
+		}
 	}
 
 	// 第三方凭据：只注入该 租户+用户 自己已授权的连接器。

@@ -16,6 +16,7 @@ import { Settings } from './Settings'
 import { Observability } from './Observability'
 import { Memory } from './Memory'
 import { Skills } from './Skills'
+import { ActivityLedger } from './ActivityLedger'
 
 type Tab = { path: string; label: string; ownerOnly?: boolean }
 
@@ -32,6 +33,7 @@ const TABS: Tab[] = [
   { path: '/admin/observability', label: '可观测' },
   { path: '/admin/memory', label: '记忆' },
   { path: '/admin/skills', label: '能力包' },
+  { path: '/admin/activity', label: '行动账本' },
   // 租户管理只有 owner 有权限（admin 的权限表里没有 tenant:manage），
   // 给 admin 显示一个必然 403 的入口没有意义。
   { path: '/admin/tenants', label: '租户', ownerOnly: true },
@@ -61,6 +63,8 @@ export function AdminLayout({ path }: { path: string }) {
         return <Memory />
       case '/admin/skills':
         return <Skills />
+      case '/admin/activity':
+        return <ActivityLedger />
       case '/admin/tenants':
         return isOwner ? <Tenants /> : <Denied />
       case '/admin/settings':

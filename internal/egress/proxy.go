@@ -119,9 +119,22 @@ type proxy struct {
 	anyDialer    *net.Dialer // 允许私网（策略显式开启时）
 	publicHTTP   *http.Transport
 	anyHTTP      *http.Transport
+	// sidecarHTTP 专供 /_connector/ 转发：目标 host 由连接器 Hosts 白名单
+	// 决定（见 sidecar.go），不是沙箱能指定的，因此用不带 blockPrivate 的
+	// anyDialer；SSRF 边界是白名单而不是 IP 段。
+	sidecarHTTP *http.Transport
+
+	// Ask 审批与凭据注入由 app 层通过 Config 注入（ext.go 的依赖倒置）。
+	// 存到 proxy 上是因为 ServeHTTP 只有 *proxy 可用；nil 分别表示降级 Deny
+	// / 不启用 sidecar，绝不静默放行。
+	approver      Approver
+	tokenProvider TokenProvider
+	askTimeout    time.Duration
 
 	closed    atomic.Bool
 	closeOnce sync.Once
+	// closedCh 在 Close 时关闭，用来唤醒所有还挂在 Ask 审批上的 handler。
+	closedCh chan struct{}
 
 	trackMu sync.Mutex
 	conns   map[net.Conn]struct{}
@@ -163,6 +176,10 @@ func newProxy(cfg Config, ln net.Listener) (*proxy, error) {
 		policyPath:    path,
 		policies:      make(map[string]Policy),
 		conns:         make(map[net.Conn]struct{}),
+		approver:      cfg.Approver,
+		tokenProvider: cfg.TokenProvider,
+		askTimeout:    cfg.AskTimeout,
+		closedCh:      make(chan struct{}),
 	}
 	p.loadPolicies()
 
@@ -170,6 +187,7 @@ func newProxy(cfg Config, ln net.Listener) (*proxy, error) {
 	p.anyDialer = &net.Dialer{Timeout: dialTimeout}
 	p.publicHTTP = newTransport(p.publicDialer)
 	p.anyHTTP = newTransport(p.anyDialer)
+	p.sidecarHTTP = newTransport(p.anyDialer)
 
 	p.srv = &http.Server{
 		Handler:           p,
@@ -278,6 +296,8 @@ func (p *proxy) Close() error {
 	var err error
 	p.closeOnce.Do(func() {
 		p.closed.Store(true)
+		// 唤醒所有挂在 Ask 审批上的 handler，让它们按 Deny 收尾而不是卡到超时。
+		close(p.closedCh)
 		if e := p.srv.Close(); e != nil && !errors.Is(e, http.ErrServerClosed) {
 			err = e
 		}
@@ -364,6 +384,14 @@ func (p *proxy) record(o owner, host, port string, dec Decision, reason string, 
 }
 
 func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 本地明文 sidecar 端点优先：HTTPS CONNECT 隧道看不到明文，token 注入
+	// 只能走这条（见 ext.go）。TokenProvider 未装配时端点等同于不存在，
+	// 请求会落到 handleForward 按普通代理请求处理并被拒。
+	if p.tokenProvider != nil && r.Method != http.MethodConnect &&
+		r.URL != nil && strings.HasPrefix(r.URL.Path, sidecarPath) {
+		p.handleSidecar(w, r)
+		return
+	}
 	if r.Method == http.MethodConnect {
 		p.handleConnect(w, r)
 		return
@@ -390,8 +418,18 @@ func (p *proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	pol := p.policyFor(o.TenantID)
 	dec, reason := decideHost(pol, host)
+	// Ask 必须在 DialContext / Hijack 之前挂起：客户端正阻塞等 CONNECT 响应，
+	// handler 阻塞即天然挂起，期间不发 200 也不拨号。
+	var askEntry *LogEntry
+	if dec == Ask {
+		askEntry, dec, reason = p.handleAsk(r, o, host, port, reason, started)
+	}
 	if dec != Allow {
-		p.record(o, host, port, dec, reason, started)
+		// handleAsk 已经落过审计并在结论后回填；只有降级（前置条件不满足）
+		// 或本来就 Deny 时才在这里补一条。
+		if askEntry == nil {
+			p.record(o, host, port, dec, reason, started)
+		}
 		http.Error(w, "egress: 出网被拒绝（"+reason+"）", http.StatusForbidden)
 		return
 	}
@@ -434,7 +472,12 @@ func (p *proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entry := p.record(o, host, port, Allow, reason, started)
+	// 审批放行的那条审计已经由 handleAsk 落好并回填了 Decision/ApprovalID，
+	// 这里复用它、只补字节数；普通 Allow 才新落一条。
+	entry := askEntry
+	if entry == nil {
+		entry = p.record(o, host, port, Allow, reason, started)
+	}
 	up, down := tunnel(client, bufrw.Reader, upstream, tunnelIdleTimeout)
 	p.ring.update(entry, func(e *LogEntry) {
 		e.BytesUp = up
@@ -493,8 +536,15 @@ func (p *proxy) handleForward(w http.ResponseWriter, r *http.Request) {
 
 	pol := p.policyFor(o.TenantID)
 	dec, reason := decideHost(pol, host)
+	// Ask 挂起点在 RoundTrip 之前：明文请求还没发出去，handler 阻塞即挂起。
+	var askEntry *LogEntry
+	if dec == Ask {
+		askEntry, dec, reason = p.handleAsk(r, o, host, port, reason, started)
+	}
 	if dec != Allow {
-		p.record(o, host, port, dec, reason, started)
+		if askEntry == nil {
+			p.record(o, host, port, dec, reason, started)
+		}
 		http.Error(w, "egress: 出网被拒绝（"+reason+"）", http.StatusForbidden)
 		return
 	}
@@ -508,6 +558,21 @@ func (p *proxy) handleForward(w http.ResponseWriter, r *http.Request) {
 	out.Header.Del("Proxy-Authorization")
 	out.Header.Del("Proxy-Connection")
 	out.Close = false
+
+	// 明文 HTTP absolute-URI：请求头就在我们手里，按目标 host 注入凭据。
+	// CONNECT 隧道里是密文，做不到（见 ext.go），只有这条路径能覆盖 http://。
+	// 没授权 / 取 token 出错都只是「不带这个头继续转发」，不改变既有行为。
+	if p.tokenProvider != nil {
+		header, value, ok, err := p.tokenProvider.TokenFor(r.Context(), o.TenantID, o.UserID, host)
+		if err != nil {
+			p.logf("取凭据失败 host=%s: %v", host, err)
+		} else if ok {
+			if header == "" {
+				header = "Authorization"
+			}
+			out.Header.Set(header, value)
+		}
+	}
 
 	var up, down counter
 	if r.Body != nil && r.Body != http.NoBody {
@@ -526,7 +591,11 @@ func (p *proxy) handleForward(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	entry := p.record(o, host, port, Allow, reason, started)
+	// 审批放行复用 handleAsk 落好的审计（已回填 Decision/ApprovalID），只补字节。
+	entry := askEntry
+	if entry == nil {
+		entry = p.record(o, host, port, Allow, reason, started)
+	}
 
 	removeHopByHop(resp.Header)
 	copyHeader(w.Header(), resp.Header)

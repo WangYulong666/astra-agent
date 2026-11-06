@@ -22,6 +22,7 @@ func newTestManager(t *testing.T, mutate func(*Config)) *manager {
 		VaultKey:           base64.StdEncoding.EncodeToString(testKey(t)),
 		VaultPath:          filepath.Join(t.TempDir(), "vault.json"),
 		BaseURL:            "https://astra.example.com",
+		SidecarBase:        "127.0.0.1:18080",
 		GitHubClientID:     "gh-id",
 		GitHubClientSecret: "gh-secret",
 		GoogleClientID:     "goog-id",
@@ -433,27 +434,52 @@ func TestExchangeErrors(t *testing.T) {
 	}
 }
 
-func TestInjectProxyIsHonest(t *testing.T) {
+// TestInjectProxyReturnsSidecarBaseOnly 是原 TestInjectProxyUnimplemented 的新语义：
+// proxy 模式不再报「未实现」，而是返回不含任何明文 token 的 sidecar 地址。
+func TestInjectProxyReturnsSidecarBaseOnly(t *testing.T) {
 	m := newTestManager(t, func(c *Config) { c.InjectMode = InjectProxy })
-	if err := m.PutKey(t.Context(), "t1", "u1", "openai", "sk-x"); err != nil {
+	const secret = "sk-super-secret-should-not-appear"
+	if err := m.PutKey(t.Context(), "t1", "u1", "openai", secret); err != nil {
 		t.Fatalf("PutKey: %v", err)
 	}
 	env, err := m.Inject(t.Context(), "t1", "u1", []string{"openai"})
-	if !errors.Is(err, ErrInjectProxyUnimplemented) {
-		t.Fatalf("proxy 模式必须如实报未实现，实际 %v", err)
+	if err != nil {
+		t.Fatalf("proxy 模式应成功返回 sidecar 地址: %v", err)
 	}
-	if env == nil || len(env) != 0 {
-		t.Fatalf("proxy 模式应返回空 map，实际 %v", env)
+	if got := env["OPENAI_API_BASE"]; got != "http://127.0.0.1:18080/_connector/openai" {
+		t.Fatalf("sidecar 地址不对: %q（env=%v）", got, env)
 	}
-	if strings.Contains(err.Error(), "未实现") == false {
-		t.Fatalf("错误信息应说明未实现: %v", err)
+	if len(env) != 1 {
+		t.Fatalf("只应注入一个 *_API_BASE，实际 %v", env)
+	}
+	// 任何 key/value 都不能是 token 变量或包含明文 token。
+	for k, v := range env {
+		if strings.Contains(v, secret) ||
+			strings.Contains(k, "TOKEN") || strings.Contains(k, "API_KEY") || strings.HasSuffix(k, "_KEY") {
+			t.Fatalf("proxy 注入泄漏了 token: %s=%s", k, v)
+		}
+	}
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("序列化: %v", err)
+	}
+	if strings.Contains(string(raw), secret) {
+		t.Fatalf("proxy 注入结果里出现明文 token: %s", raw)
 	}
 }
 
 func TestInjectDefaultModeIsProxy(t *testing.T) {
 	m := newTestManager(t, nil) // InjectMode 为空 → 默认 proxy
-	if _, err := m.Inject(t.Context(), "t1", "u1", []string{"openai"}); !errors.Is(err, ErrInjectProxyUnimplemented) {
-		t.Fatalf("默认应走 proxy（不会悄悄降级成 env）: %v", err)
+	// 注意：这里故意不 PutKey —— proxy 模式只给地址、不读 token，不该因未连接而失败。
+	env, err := m.Inject(t.Context(), "t1", "u1", []string{"openai"})
+	if err != nil {
+		t.Fatalf("默认 proxy 应成功（SidecarBase 已配），实际 %v", err)
+	}
+	if got := env["OPENAI_API_BASE"]; !strings.HasPrefix(got, "http://") || !strings.Contains(got, "/_connector/openai") {
+		t.Fatalf("默认模式应走 proxy 给 sidecar 地址，实际 %v", env)
+	}
+	if _, leaked := env["OPENAI_API_KEY"]; leaked {
+		t.Fatalf("默认模式不该悄悄降级成 env 注入明文 token: %v", env)
 	}
 }
 

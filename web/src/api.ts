@@ -569,3 +569,56 @@ export const memoryApi = {
       `/v1/memory/search?q=${encodeURIComponent(q)}&k=${k}`,
     ),
 }
+
+// ── 用户视角行动账本（GET /v1/runs/{id}/activity, /v1/sessions/{id}/activity）──
+//
+// 字段与 internal/activity.Entry / Summary 的 json tag 逐字对应。
+// session 视图后端不回 summary，计数在前端按 entries 现算（见 activityModel.ts）。
+
+/** 时间线里的一条行动。kind 决定图标/标签，status 决定徽标配色。 */
+export type ActivityEntry = {
+  time: string
+  kind: string
+  title: string
+  detail?: string
+  status: string
+  runId?: string
+  sessionId?: string
+  /** 原记录定位：toolCallId / approvalId / host / childRunId。 */
+  ref?: string
+}
+
+/** 顶部四个计数 + 一句「现在卡在哪」。current 为空表示没有阻塞项。 */
+export type ActivitySummary = {
+  done: number
+  running: number
+  blocked: number
+  failed: number
+  current?: string
+}
+
+export type RunActivityResponse = {
+  runId: string
+  entries: ActivityEntry[]
+  summary: ActivitySummary
+}
+
+export type SessionActivityResponse = {
+  sessionId: string
+  entries: ActivityEntry[]
+}
+
+export const activityApi = {
+  runActivity: (runId: string, limit?: number) => {
+    const q = limit && limit > 0 ? `?limit=${limit}` : ''
+    return request<RunActivityResponse>(
+      `/v1/runs/${encodeURIComponent(runId)}/activity${q}`,
+    )
+  },
+  sessionActivity: (sessionId: string, limit?: number) => {
+    const q = limit && limit > 0 ? `?limit=${limit}` : ''
+    return request<SessionActivityResponse>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/activity${q}`,
+    )
+  },
+}

@@ -79,7 +79,7 @@ func clonePolicy(p Policy) Policy {
 //
 //  1. 私网拦截优先于任何规则——「allow *」不能把 169.254.169.254 放出去；
 //  2. 规则按顺序，第一条命中即生效（Rule 注释里承诺过）；
-//  3. Ask 目前按 Deny 处理并标 ask-unsupported（审批流下一轮接）；
+//  3. Ask 原样返回，由 proxy 决定挂起审批或在缺前置条件时降级 Deny；
 //  4. 都没命中走 Default。
 func decideHost(pol Policy, host string) (Decision, string) {
 	host = normalizeHost(host)
@@ -101,16 +101,14 @@ func decideHost(pol Policy, host string) (Decision, string) {
 		case Deny:
 			return Deny, "rule:" + rule.Pattern
 		case Ask:
-			// 没有审批通道时放行是不负责任的，挂起又没人会来批，
-			// 所以只能是「拒绝 + 显式原因」，让用户知道这不是配置错了。
-			return Deny, "ask-unsupported"
+			return Ask, "rule:" + rule.Pattern
 		}
 	}
 	if pol.Default == Allow {
 		return Allow, "default"
 	}
 	if pol.Default == Ask {
-		return Deny, "ask-unsupported"
+		return Ask, "default"
 	}
 	return Deny, "default"
 }

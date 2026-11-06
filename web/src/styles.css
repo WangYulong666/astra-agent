@@ -4211,3 +4211,87 @@ kbd {
     justify-content: center;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════
+   用户视角行动账本（.ledger-*）—— 只追加。颜色一律沿用 CSS 变量，
+   不硬编码深色背景，theme.css 覆盖同名变量时自动跟随。
+   ══════════════════════════════════════════════════════════════ */
+
+/* 每个条目 / 状态一个色调：--lg 是文字、圆点、徽标色，--lgbg 是半透明底。
+   变量都来自 :root，因此深色主题由 theme.css 统一决定，这里不写死颜色值。 */
+.ledger-tone-done     { --lg: var(--green);    --lgbg: var(--green-soft); }
+.ledger-tone-running  { --lg: var(--accent);   --lgbg: var(--accent-soft); }
+.ledger-tone-blocked  { --lg: var(--amber);    --lgbg: var(--amber-soft); }
+.ledger-tone-failed   { --lg: var(--red);      --lgbg: var(--red-soft); }
+.ledger-tone-plan     { --lg: var(--accent-2); --lgbg: var(--accent-soft); }
+.ledger-tone-tool     { --lg: var(--accent);   --lgbg: var(--accent-soft); }
+.ledger-tone-approval { --lg: var(--amber);    --lgbg: var(--amber-soft); }
+.ledger-tone-egress   { --lg: var(--green);    --lgbg: var(--green-soft); }
+.ledger-tone-message  { --lg: var(--text-2);   --lgbg: var(--panel-2); }
+.ledger-tone-child    { --lg: var(--accent-2); --lgbg: var(--accent-soft); }
+.ledger-tone-state    { --lg: var(--muted);    --lgbg: var(--panel-2); }
+.ledger-tone-error    { --lg: var(--red);      --lgbg: var(--red-soft); }
+
+/* 查询条：flex-wrap 让按钮在窄屏自动换行，不撑破容器。 */
+.ledger-filter { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ledger-input { flex: 1 1 160px; min-width: 0; width: auto; max-width: 360px; }
+
+/* 顶部四个计数：宽屏 4 列，窄屏 2 列。 */
+.ledger-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.ledger-stat { min-width: 0; }
+.ledger-v-done { color: var(--green); }
+.ledger-v-running { color: var(--accent); }
+.ledger-v-blocked { color: var(--amber); }
+.ledger-v-failed { color: var(--red); }
+
+.ledger-current strong { color: var(--amber); font-weight: 600; }
+.ledger-disabled { display: flex; flex-direction: column; }
+
+/* 时间线：左侧竖线 + 圆点徽标，右侧条目。
+   .ledger-item 的 min-width:0 是 393px 下长文本不溢出的关键。 */
+.ledger-timeline { padding: 4px 0; }
+.ledger-row { display: flex; gap: 12px; padding: 0 16px; }
+.ledger-rail {
+  position: relative; flex: none; width: 32px; align-self: stretch;
+  display: flex; justify-content: center; padding-top: 12px;
+}
+.ledger-rail::before {
+  content: ''; position: absolute; top: 0; bottom: 0; left: 50%;
+  width: 2px; background: var(--border); transform: translateX(-50%);
+}
+.ledger-dot {
+  position: relative; z-index: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 50%; flex: none;
+  font-size: 12px; font-weight: 600; line-height: 1;
+  color: var(--lg, var(--text-2));
+  background: var(--lgbg, var(--panel-2));
+  border: 1px solid var(--lg, var(--border-2));
+}
+.ledger-item {
+  flex: 1; min-width: 0; padding: 12px 0 16px;
+  border-bottom: 1px solid var(--border);
+}
+.ledger-row:last-child .ledger-item { border-bottom: none; }
+
+.ledger-item-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.ledger-time { font-size: 11.5px; color: var(--muted); font-family: var(--mono); }
+.ledger-kind, .ledger-status {
+  display: inline-flex; align-items: center; height: 20px; padding: 0 8px;
+  border-radius: 999px; font-size: 11px; white-space: nowrap;
+  color: var(--lg, var(--text-2));
+  background: var(--lgbg, var(--panel-2));
+  border: 1px solid var(--border-2);
+}
+.ledger-title { font-size: 13.5px; color: var(--text); font-weight: 550; word-break: break-word; }
+.ledger-detail {
+  margin-top: 4px; font-size: 12.5px; color: var(--text-2);
+  white-space: pre-wrap; word-break: break-word; line-height: 1.6;
+}
+.ledger-ref { margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+@media (max-width: 479px) {
+  .ledger-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ledger-row { padding: 0 12px; gap: 10px; }
+  .ledger-filter .ledger-input { flex-basis: 100%; max-width: none; }
+}

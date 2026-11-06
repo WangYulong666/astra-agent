@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,12 +25,16 @@ const (
 	refreshSkew = 60 * time.Second
 )
 
-// ErrInjectProxyUnimplemented 是 proxy 模式的**诚实回复**：
-// egress 代理目前只做域名策略，还没有「按 sandbox 换掉 Authorization」的能力，
-// 所以这里不能假装注入成功——那会让调用方以为沙箱拿到了代理地址。
+// ErrInjectProxyUnimplemented 是 v3 之前 proxy 模式的「诚实回复」。
+// proxy 注入已在 Inject 里落地，本错误不再由 Inject 返回；保留变量是因为
+// 其它包（如 runner 的单测）仍引用它作为「注入失败」的哨兵，删掉会破坏编译。
 var ErrInjectProxyUnimplemented = errors.New(
 	"connector: proxy 注入尚未实现——egress 代理还没接 token 替换，注入了也没有任何效果；" +
 		"临时办法是把 CONNECTOR_INJECT_MODE 设为 env（token 会进沙箱环境，有泄漏风险），或先不注入")
+
+// ErrProxyUnavailable 表示 proxy 模式要用的出网代理（sidecar）没启用：
+// 此时不能给一个连不上的假地址，也不能静默返回空 map（runner 会当成成功）。
+var ErrProxyUnavailable = errors.New("connector: 出网代理未启用，proxy 注入不可用（SidecarBase 为空）")
 
 type manager struct {
 	cfg     Config
@@ -41,6 +46,9 @@ type manager struct {
 	http      *http.Client
 	// tokenURLs 默认来自 definitions；单测里覆盖成 httptest 地址。
 	tokenURLs map[string]string
+	// tokenCache / cacheMu 是 TokenFor 的短期缓存（实现见 ext_stub.go）。
+	cacheMu    sync.Mutex
+	tokenCache map[string]tokenCacheEntry
 }
 
 // Open 装配连接器与保管库。
@@ -49,10 +57,11 @@ type manager struct {
 // 平台照常启动。没有主密钥时绝不能退化成明文存储。
 func Open(cfg Config) (Manager, error) {
 	m := &manager{
-		cfg:       cfg,
-		http:      &http.Client{Timeout: tokenTimeout},
-		injectMod: cfg.InjectMode,
-		tokenURLs: make(map[string]string, len(definitions)),
+		cfg:        cfg,
+		http:       &http.Client{Timeout: tokenTimeout},
+		injectMod:  cfg.InjectMode,
+		tokenURLs:  make(map[string]string, len(definitions)),
+		tokenCache: make(map[string]tokenCacheEntry),
 	}
 	for _, d := range definitions {
 		if d.tokenURL != "" {
@@ -125,14 +134,19 @@ func (m *manager) Enabled() bool {
 	return m != nil && m.enabled && m.vault != nil
 }
 
+// cloneConnector 拷贝切片字段，避免调用方（HTTP 层 / app 的 tokenAdapter）
+// 改到包级 definitions。
+func cloneConnector(c Connector) Connector {
+	c.Hosts = append([]string(nil), c.Hosts...)
+	c.Scopes = append([]string(nil), c.Scopes...)
+	c.EnvNames = append([]string(nil), c.EnvNames...)
+	return c
+}
+
 func (m *manager) List() []Connector {
 	out := make([]Connector, 0, len(definitions))
 	for _, d := range definitions {
-		c := d.Connector
-		// 拷贝切片：调用方（HTTP 层）不该能改到包级定义。
-		c.Scopes = append([]string(nil), d.Scopes...)
-		c.EnvNames = append([]string(nil), d.EnvNames...)
-		out = append(out, c)
+		out = append(out, cloneConnector(d.Connector))
 	}
 	return out
 }
@@ -151,7 +165,11 @@ func (m *manager) Delete(ctx context.Context, tenantID, userID, name string) err
 	if _, ok := lookup(name); !ok {
 		return fmt.Errorf("%w: 未知连接器 %q", ErrNotFound, name)
 	}
-	return m.vault.delete(tenantID, userID, name)
+	if err := m.vault.delete(tenantID, userID, name); err != nil {
+		return err
+	}
+	m.invalidateTokenCache(tenantID, userID, name)
+	return nil
 }
 
 // PutKey 存一个 API key（只有 apikey 型连接器能走这条路）。
@@ -169,23 +187,28 @@ func (m *manager) PutKey(ctx context.Context, tenantID, userID, name, key string
 	if strings.TrimSpace(key) == "" {
 		return errors.New("connector: key 不能为空")
 	}
-	return m.vault.set(Credential{
+	if err := m.vault.set(Credential{
 		TenantID: tenantID,
 		UserID:   userID,
 		Name:     name,
 		Kind:     def.Kind,
 		Token:    strings.TrimSpace(key),
 		LinkedAt: time.Now().UTC(),
-	})
+	}); err != nil {
+		return err
+	}
+	m.invalidateTokenCache(tenantID, userID, name)
+	return nil
 }
 
 // Inject 返回要注入沙箱的环境变量。
 //
-// 两种模式的语义差别很大：
-//   - env：直接给明文 token。agent 能读到、能打印、能外传——只在可信 agent +
-//     短生命周期 token 时用，且每次都打一条醒目告警（不静默降级）。
-//   - proxy：正确做法，但 egress 侧还没实现 token 替换，这里如实报错，
-//     返回空 map 而不是"看起来成功"的半成品。
+// 两种模式语义差别很大：
+//   - proxy（默认）：只给「本地 sidecar 基址」，不含任何 token。token 留在控制面，
+//     由 egress sidecar 在转发请求时按用户取用注入。env 名从 EnvNames[0] 推导，
+//     见 apiBaseEnvName。这样 agent 即便打印全部环境变量也拿不到凭据。
+//   - env：把明文 token 放进环境变量（有泄漏风险，仅可信 agent + 短生命周期
+//     token 时用），且每次打一条醒目告警，不静默降级。
 func (m *manager) Inject(ctx context.Context, tenantID, userID string, names []string) (map[string]string, error) {
 	if !m.Enabled() {
 		return nil, ErrDisabled
@@ -193,10 +216,11 @@ func (m *manager) Inject(ctx context.Context, tenantID, userID string, names []s
 	if len(names) == 0 {
 		return map[string]string{}, nil
 	}
-	if m.injectMod != InjectEnv {
-		return map[string]string{}, ErrInjectProxyUnimplemented
+	if m.injectMod == InjectProxy {
+		return m.injectProxyEnv(names)
 	}
 
+	// InjectEnv 明文分支保持原样：token 进沙箱 + 醒目告警。
 	env := make(map[string]string, len(names))
 	injected := make([]string, 0, len(names))
 	for _, name := range names {
@@ -217,9 +241,57 @@ func (m *manager) Inject(ctx context.Context, tenantID, userID string, names []s
 	}
 	log.Printf("[安全告警] 连接器凭据以明文环境变量注入沙箱：%s（tenant=%s user=%s）——"+
 		"沙箱内任何代码（包括 agent 自己）都能读取并外传，也可能出现在日志/回放里。"+
-		"仅在可信 agent + 短生命周期 token 下使用；正确做法是 proxy 模式（尚未实现）。",
+		"仅在可信 agent + 短生命周期 token 下使用；正确做法是 proxy 模式（token 不进沙箱）。",
 		strings.Join(injected, ","), tenantID, userID)
 	return env, nil
+}
+
+// injectProxyEnv 给沙箱的是 sidecar 基址而不是 token。
+//
+// 地址形如 http://<SidecarBase>/_connector/<name>（SidecarBase 是 host:port），
+// 与 internal/egress 的 sidecarPath 约定一致；sidecar 转发时按 name 取 TokenFor
+// 注入 header 再打到 Connector.APIBase。这里刻意不读 token、也不检查用户是否已连接：
+// 连接与否由 sidecar 的 TokenFor 决定（未授权时拒绝转发）。
+func (m *manager) injectProxyEnv(names []string) (map[string]string, error) {
+	base := strings.TrimSuffix(strings.TrimSpace(m.cfg.SidecarBase), "/")
+	if base == "" {
+		// 代理没启用：明确报错，绝不给一个连不上的假地址，也不静默返回空 map。
+		return nil, ErrProxyUnavailable
+	}
+	env := make(map[string]string, len(names))
+	for _, name := range names {
+		def, ok := lookup(name)
+		if !ok {
+			return nil, fmt.Errorf("%w: 未知连接器 %q", ErrNotFound, name)
+		}
+		if len(def.EnvNames) == 0 {
+			return nil, fmt.Errorf("connector: %s 没有定义注入的环境变量名", name)
+		}
+		if def.APIBase == "" || len(def.Hosts) == 0 {
+			return nil, fmt.Errorf("connector: %s 未定义 Hosts/APIBase，无法走 proxy 注入", name)
+		}
+		env[apiBaseEnvName(def.EnvNames[0])] = "http://" + base + "/_connector/" + name
+	}
+	return env, nil
+}
+
+// apiBaseEnvName 从 token 环境变量名推导 *_API_BASE 名。规则写死在这里，改内置
+// EnvNames 时必须同步本函数与 TestAPIBaseEnvNameDerivation：
+//  1. 去掉 token/key 类后缀，长后缀优先（否则 GOOGLE_ACCESS_TOKEN 会被 _TOKEN
+//     切成 GOOGLE_ACCESS、OPENAI_API_KEY 会被 _KEY 切成 OPENAI_API）；顺序固定为
+//     _ACCESS_TOKEN → _API_KEY → _TOKEN → _KEY。
+//  2. 剩下的前缀加 _API_BASE。
+//
+// 例：GITHUB_TOKEN → GITHUB_API_BASE；GOOGLE_ACCESS_TOKEN → GOOGLE_API_BASE；
+// NOTION_TOKEN → NOTION_API_BASE；OPENAI_API_KEY → OPENAI_API_BASE。
+// 没匹配到后缀时保守地直接加 _API_BASE（仍是确定、可用的变量名）。
+func apiBaseEnvName(envName string) string {
+	for _, suffix := range []string{"_ACCESS_TOKEN", "_API_KEY", "_TOKEN", "_KEY"} {
+		if strings.HasSuffix(envName, suffix) {
+			return strings.TrimSuffix(envName, suffix) + "_API_BASE"
+		}
+	}
+	return envName + "_API_BASE"
 }
 
 // credential 取一条明文凭据，快过期时先刷新。

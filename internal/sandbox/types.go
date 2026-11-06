@@ -51,6 +51,28 @@ type Endpoint struct {
 	Token string // Bearer token；空表示该 provider 不做鉴权（仅 local 允许）
 }
 
+// NetworkPolicy 描述「出网强制边界」：用 Seatbelt 把出网收窄到本机代理端口。
+//
+// 这是双层出网边界里的第 1 层（强制）：
+//   - 本结构驱动 Seatbelt，只放行连本机代理端口、DNS 的 unix-socket、本机 inbound/bind。
+//   - 域名 allow/deny/ask、审计、token 注入仍由 egress 代理（第 2 层）执行。
+//     Seatbelt 只能按数值 IP/端口匹配，看不到域名，两层职责不重叠。
+//
+// 形状由主控在 runner 侧构造后塞进 AgentSpec；本包不读环境变量、不改 runner。
+//
+// ⚠️ 默认必须关闭。规则一旦写错（或代理没起在该端口），代价是「所有 agent 连不上
+// 模型」。开启与否由主控按部署形态决定，sandbox 只负责忠实执行传进来的配置。
+type NetworkPolicy struct {
+	// Enabled 总开关。false 时生成的 profile 与未启用本能力时逐字节相同。
+	Enabled bool
+	// ProxyAddr 出网代理地址，形如 "127.0.0.1:17890"。
+	// 生成规则时按端口放行；host 会归一化（见 local.go 的 sbplAddr）。
+	ProxyAddr string
+	// ExtraAllow 额外放行的 "host:port"，如本机 LLM 网关 "127.0.0.1:7788"。
+	// 逐条校验，非法值忽略并记日志。
+	ExtraAllow []string
+}
+
 // AgentSpec 描述沙箱里要跑什么 agent。
 //
 // 镜像/容器方案会忽略 Command 而用模板里预置的入口，local 方案则真的按 Command 起进程。
@@ -76,6 +98,12 @@ type AgentSpec struct {
 	SelfSandbox bool
 	// ProxyBin acp-proxy 二进制路径；空表示与 provider 同目录/走 PATH。
 	ProxyBin string
+	// NetworkPolicy 出网强制边界配置（可选）。nil 或 Enabled=false 表示不启用，
+	// profile 与现状完全一致。
+	//
+	// 由主控构造；会持久化进 meta.json，使 pause→resume（Resume 只带 Command 重启）
+	// 后边界不静默消失。spawn 一律以 meta 里落盘的值为准，不读这里的字段。
+	NetworkPolicy *NetworkPolicy
 }
 
 // CreateRequest 起一个沙箱。

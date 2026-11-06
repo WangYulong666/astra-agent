@@ -60,7 +60,10 @@ type Coordinator interface {
 // runner 想反过来用 collab 时立刻撞环。app 层做适配器。
 type Sessions interface {
 	CreateSession(ctx context.Context, opts CreateOpts) (SessionInfo, error)
-	StartRun(ctx context.Context, sessionID, input string) (RunInfo, error)
+	// StartRun 的 parentRunID 必须在 CreateRun 时就写进 store.Run，
+	// 不能事后 GetRun+UpdateRun 补写：execute goroutine 同时在改 run，
+	// 补写会被覆盖（或反过来把别人的字段顶掉）。
+	StartRun(ctx context.Context, sessionID, input, parentRunID string) (RunInfo, error)
 	CancelRun(ctx context.Context, runID string) error
 }
 

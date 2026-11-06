@@ -214,25 +214,28 @@ func TestE2EConnectDenyPath(t *testing.T) {
 
 func TestE2EAskUnsupported(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("Ask 暂按 deny，不该到达目标")
+		t.Error("无 Approver 时 Ask 必须降级 deny，不该到达目标")
 	}))
 	defer srv.Close()
 
+	// 没装 Approver：Ask 只能降级 Deny，绝不静默放行。
 	ctl := openTestProxy(t, Policy{
 		Default:      Deny,
 		AllowPrivate: true,
 		Rules:        []Rule{{Pattern: "127.0.0.1", Decision: Ask}},
 	})
-	client := proxyClient(t, ctl, "", "", &tls.Config{InsecureSkipVerify: true})
+	// 登记一个带 runID 的沙箱，隔离出「缺的只是 Approver」这一个条件。
+	ctl.Register("sb-ask", "t1", "u1", "sess-1", "run-1")
+	client := proxyClient(t, ctl, "sb-ask", "nonce", &tls.Config{InsecureSkipVerify: true})
 
 	if _, err := client.Get(srv.URL); err == nil {
-		t.Fatal("Ask 在审批流接入前应表现为连接失败")
+		t.Fatal("Ask 在无 Approver 时应表现为连接失败")
 	}
-	e := waitEntry(t, ctl, "", func(e LogEntry) bool {
+	e := waitEntry(t, ctl, "t1", func(e LogEntry) bool {
 		return e.Host == "127.0.0.1" && e.Decision == Deny
 	})
-	if !strings.Contains(e.Reason, "ask-unsupported") {
-		t.Errorf("Reason = %q, 应显式标 ask-unsupported", e.Reason)
+	if e.Reason != "ask-no-approver" {
+		t.Errorf("Reason = %q, 应显式标 ask-no-approver", e.Reason)
 	}
 }
 

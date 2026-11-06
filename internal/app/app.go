@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/WangYulong666/astra-agent/internal/api"
 	"github.com/WangYulong666/astra-agent/internal/auth"
+	"github.com/WangYulong666/astra-agent/internal/egress"
 	"github.com/WangYulong666/astra-agent/internal/eventbus"
 	"github.com/WangYulong666/astra-agent/internal/lifecycle"
 	"github.com/WangYulong666/astra-agent/internal/llmwire"
@@ -259,6 +261,7 @@ func New(cfg Config) (*Server, error) {
 		Egress:       egCtl,
 		Connectors:   connMgr,
 		EgressBypass: egBypass,
+		NetworkLock:  networkLockEnabled(lg, egCtl),
 	})
 	if err != nil {
 		st.Close()
@@ -640,4 +643,21 @@ func egressBypassFor(cfg Config, lg *log.Logger) string {
 		return u.Host
 	}
 	return ""
+}
+
+// networkLockEnabled 决定要不要给沙箱套 Seatbelt 网络锁。
+//
+// 默认关。开启条件很硬：必须显式设 ASTRA_NETWORK_LOCK=1 且出网代理真的起来了。
+// 少一个都不开——规则写错或代理没起会让所有 agent 连不上模型，报错还只是
+// "Operation not permitted"，排查成本极高，不能让它成为默认行为。
+func networkLockEnabled(lg *log.Logger, egCtl egress.Controller) bool {
+	if !envBool("ASTRA_NETWORK_LOCK", false) {
+		return false
+	}
+	if egCtl == nil || !egCtl.Enabled() {
+		lg.Printf("⚠ 已忽略 ASTRA_NETWORK_LOCK：出网代理未启用，开了会全断网")
+		return false
+	}
+	lg.Printf("⚠ 出网强制边界已开启：沙箱只能连 %s（DNS 与本机回环例外）", egCtl.Addr())
+	return true
 }
