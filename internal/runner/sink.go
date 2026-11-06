@@ -131,16 +131,54 @@ func (s *sink) flushLocked() {
 	}
 }
 
-func (s *sink) appendLocked(typ string, payload any) {
+// stage 落库一条事件但**先不发布**，返回事件供调用方在元数据写完之后 publish。
+//
+// 为什么需要拆开：终态要同时满足两类客户端——
+//   - 轮询 run.Status 的客户端（前端首屏 / CLI / history 接口）看到终态就拉
+//     事件流，此时终态事件必须已经在库里，否则最后一条是 message_delta；
+//   - 订阅 SSE 的客户端收到「结束」立刻查 run，此时 run 必须已经是终态，
+//     否则读到 running，事件与元数据自相矛盾。
+//
+// 把「落库」和「发布」绑成一步，无论先写谁都会有一类客户端看到中间态。
+// 用法见 Manager.finish：stage 终态事件 → UpdateRun 终态 → publish。
+func (s *sink) stage(typ string, payload any) store.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return store.Event{}
+	}
+	s.flushLocked()
 	if s.err != nil {
-		return
+		return store.Event{}
 	}
 	ev, err := s.st.Append(s.ctx, s.runID, store.NewEvent{Type: typ, Payload: payload})
 	if err != nil {
 		s.err = err
-		return
+		return store.Event{}
 	}
-	if s.hub != nil {
+	return ev
+}
+
+// publish 发布一条由 stage 落好库的事件。零值事件（落库失败）直接忽略。
+func (s *sink) publish(ev store.Event) {
+	if s.hub != nil && ev.RunID != "" {
 		s.hub.Publish(ev)
 	}
+}
+
+func (s *sink) appendLocked(typ string, payload any) {
+	ev := s.appendLockedStaged(typ, payload)
+	s.publish(ev)
+}
+
+func (s *sink) appendLockedStaged(typ string, payload any) store.Event {
+	if s.err != nil {
+		return store.Event{}
+	}
+	ev, err := s.st.Append(s.ctx, s.runID, store.NewEvent{Type: typ, Payload: payload})
+	if err != nil {
+		s.err = err
+		return store.Event{}
+	}
+	return ev
 }

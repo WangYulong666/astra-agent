@@ -668,13 +668,16 @@ func (m *Manager) finish(ctx context.Context, run store.Run, s *sink, status, st
 	// 但 panic / 连接断开时可能留下孤儿，不结掉的话等待方会一直挂着。
 	m.releaseApprovals(run.ID, DecisionDeny)
 
-	// 顺序很重要：先 flush 增量，再写错误，再归档元数据，最后才发终态事件。
-	// 反过来的话，客户端收到「结束」立刻去查 run，会读到还是 running 的旧值
-	// ——事件与元数据自相矛盾。
+	// 顺序很重要，而且不能只写「先事件还是先元数据」——两类客户端方向相反：
+	//   - 轮询 run.Status 的（前端首屏 / CLI / history）看到终态就拉事件流，
+	//     终态事件必须已经落库，否则最后一条是 message_delta；
+	//   - 订阅 SSE 的收到「结束」立刻查 run，run 必须已是终态，否则自相矛盾。
+	// 所以把终态事件拆成「先落库、后发布」两步，中间夹着元数据写入。
 	s.flush()
 	if cause != nil {
 		s.event(store.EventError, map[string]any{"message": cause.Error()})
 	}
+	terminal := s.stage(store.EventState, map[string]any{"status": status, "stopReason": stopReason})
 
 	run.Status = status
 	run.StopReason = stopReason
@@ -685,7 +688,8 @@ func (m *Manager) finish(ctx context.Context, run store.Run, s *sink, status, st
 	if err := m.cfg.Store.UpdateRun(context.WithoutCancel(ctx), run); err != nil && !isGone(err) {
 		m.log.Printf("run %s 终态写入失败: %v", run.ID, err)
 	}
-	s.event(store.EventState, map[string]any{"status": status, "stopReason": stopReason})
+	// 元数据已经是终态了，现在才让订阅者看到「结束」。
+	s.publish(terminal)
 	if cause != nil {
 		m.log.Printf("run %s 失败: %v", run.ID, cause)
 	} else {
