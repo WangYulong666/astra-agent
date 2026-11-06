@@ -190,10 +190,21 @@ func (s *Store) ListRuns(ctx context.Context, sessionID string) ([]store.Run, er
 // 它是 Append 的私有计数器，调用方手里的 Run 副本通常是旧的，
 // 写回去会把已分配过的 seq 倒退（file store 里那段「以已落库事件为准」的逻辑）。
 func (s *Store) UpdateRun(ctx context.Context, r store.Run) error {
-	res, err := s.exec(ctx, `UPDATE runs SET status = ?, input = ?, stop_reason = ?, error = ?,
-	started_at = ?, ended_at = ? WHERE id = ?`,
+	q := `UPDATE runs SET status = ?, input = ?, stop_reason = ?, error = ?,
+	started_at = ?, ended_at = ? WHERE id = ?`
+	args := []any{
 		r.Status, r.Input, r.StopReason, r.Error,
-		s.timeVal(r.StartedAt), s.timeVal(r.EndedAt), r.ID)
+		s.timeVal(r.StartedAt), s.timeVal(r.EndedAt), r.ID,
+	}
+	// 终态不可逆：非终态的写入不覆盖已落库的终态。
+	//
+	// 与 file store 同一个道理：审批回调（ACP 读循环协程）手里的 run 是旧快照，
+	// 它把状态置回 running 时，收尾可能已经写了 cancelled。条件更新让数据库
+	// 自己判定谁该赢，而不是靠调用方的时序。
+	if !store.IsTerminal(r.Status) {
+		q += ` AND status NOT IN ('completed', 'failed', 'cancelled')`
+	}
+	res, err := s.exec(ctx, q, args...)
 	if err != nil {
 		return err
 	}
@@ -202,6 +213,11 @@ func (s *Store) UpdateRun(ctx context.Context, r store.Run) error {
 		return err
 	}
 	if n == 0 {
+		// 可能是「没有这条 run」，也可能是「被终态保护拦下了」——后者是幂等成功。
+		var cur string
+		if qerr := s.db.QueryRowContext(ctx, `SELECT status FROM runs WHERE id = ?`, r.ID).Scan(&cur); qerr == nil {
+			return nil
+		}
 		return fmt.Errorf("%w: run %s", store.ErrNotFound, r.ID)
 	}
 	return nil

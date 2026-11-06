@@ -44,6 +44,10 @@ tags:
     description: "租户 / 用户 / 凭据 / 审计 / 全租户用量。"
   - name: LLM
     description: "虚拟 key 签发与 OpenAI 兼容透传。"
+  - name: Memory
+    description: "长期记忆（向量检索）。只读写当前登录用户自己的记忆，租户按 partition key 隔离。"
+  - name: Observability
+    description: "Langfuse 观测。secret key 留在服务端，浏览器与 CLI 只拿到代理结果。"
   - name: Meta
     description: "运行信息与契约本身。"
 
@@ -1383,6 +1387,200 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /v1/memory/ingest:
+    post:
+      operationId: memory_ingest
+      summary: "写入一条长期记忆（fact 或 conversation）。"
+      tags: [Memory]
+      description: "tenant_id 与 user_id 一律取自登录身份，请求体不接受——否则等于允许往别人名下写。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryIngestRequest'
+      responses:
+        "201":
+          description: "已写入，返回带 id 与 created_at 的完整记录。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryItem'
+        "400":
+          description: "text 为空，或 kind 不是 fact / conversation。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "401":
+          description: "未登录。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "503":
+          description: "记忆能力未启用（未配置 MILVUS_ADDR）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/memory/search:
+    get:
+      operationId: memory_search
+      summary: "按语义检索当前用户的记忆。"
+      tags: [Memory]
+      description: "过滤条件由服务端拼成 tenant_id == … and user_id == …，调用方无法指定别的用户。"
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: "自然语言查询。"
+        - name: k
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+          description: "返回条数上限，超过 50 按 50 处理。"
+        - name: kind
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [fact, conversation]
+          description: "只查某一类。"
+      responses:
+        "200":
+          description: "命中结果，按相似度降序。score 越大越相似。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemorySearchResult'
+        "400":
+          description: "缺少 q，或 k 非法。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "503":
+          description: "记忆能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/memory/stats:
+    get:
+      operationId: memory_stats
+      summary: "记忆集合概况（条数 / 维度 / embedder），不含内容。"
+      tags: [Memory]
+      responses:
+        "200":
+          description: "统计。未启用时返回 enabled=false，而不是错误。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoryStats'
+        "503":
+          description: "记忆能力未启用且端点要求可用（stats 本身容忍关闭，此码留给未来）."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/memory/{id}:
+    delete:
+      operationId: memory_delete
+      summary: "删除一条记忆（合规删除）。"
+      tags: [Memory]
+      description: "tenant + user + id 一起进过滤条件：别人的 id 即便被猜到也删不掉，且不区分「不存在」与「不属于你」。"
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: "已删除。"
+        "404":
+          description: "不存在或不属于当前用户。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "503":
+          description: "记忆能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/admin/obs/config:
+    get:
+      operationId: get_obs_config
+      summary: "观测能力是否启用、上报到哪、面板地址。"
+      tags: [Observability]
+      description: "只回 public key；secret key 永远不出服务端。"
+      responses:
+        "200":
+          description: "配置。未启用时 enabled=false，其余为空串。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObsConfig'
+        "403":
+          description: "需要 obs:read（owner / admin）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /v1/admin/obs/traces:
+    get:
+      operationId: list_obs_traces
+      summary: "代理查询 Langfuse trace 列表。"
+      tags: [Observability]
+      parameters:
+        - name: run_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "按 run 过滤。"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: "trace 摘要列表。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ObsTraceList'
+        "403":
+          description: "需要 obs:read。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        "503":
+          description: "观测能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /v1/openapi.json:
     get:
       operationId: get_openapi
@@ -2292,3 +2490,128 @@ components:
         baseUrl:
           type: string
           description: "沙箱应使用的网关地址。"
+
+    MemoryItem:
+      type: object
+      description: "一条长期记忆。score 只在检索结果里有值。"
+      required: [id, tenant_id, user_id, kind, text, created_at]
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        user_id:
+          type: string
+        session_id:
+          type: string
+        kind:
+          type: string
+          enum: [fact, conversation]
+        text:
+          type: string
+          description: "原文。入库时按 UTF-8 边界截断到 8192 字节。"
+        score:
+          type: number
+          format: float
+          description: "相似度，越大越相近（Milvus 的 L2 距离已换算成 1/(1+d)）。"
+        created_at:
+          type: string
+          format: date-time
+        meta:
+          type: object
+          additionalProperties: true
+
+    MemoryIngestRequest:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+        kind:
+          type: string
+          enum: [fact, conversation]
+          default: fact
+        session_id:
+          type: string
+        meta:
+          type: object
+          additionalProperties: true
+
+    MemorySearchResult:
+      type: object
+      required: [items, query, k]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/MemoryItem'
+        query:
+          type: string
+        k:
+          type: integer
+
+    MemoryStats:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+        backend:
+          type: string
+          description: "milvus / disabled。"
+        collection:
+          type: string
+        count:
+          type: integer
+          format: int64
+        dim:
+          type: integer
+        embedder:
+          type: string
+
+    ObsConfig:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+        endpoint:
+          type: string
+        dashboard_url:
+          type: string
+        public_key:
+          type: string
+
+    ObsTrace:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        run_id:
+          type: string
+        status:
+          type: string
+        latency_ms:
+          type: integer
+          format: int64
+        started_at:
+          type: string
+          format: date-time
+        url:
+          type: string
+          description: "Langfuse 面板地址，点开看完整链路。"
+        input:
+          type: string
+
+    ObsTraceList:
+      type: object
+      required: [items, limit]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ObsTrace'
+        limit:
+          type: integer

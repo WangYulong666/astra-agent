@@ -232,3 +232,79 @@ func TestGetRunUnknown(t *testing.T) {
 		t.Errorf("未知 run 应返回 ErrNotFound，实际 %v", err)
 	}
 }
+
+// 终态不可逆：审批回调（ACP 读循环协程）手里是旧快照，它把状态置回 running 时，
+// run 收尾可能已经写了 cancelled。没有这道保护，库里会退回 running，
+// 表现是「日志说结束了，客户端轮询一直转圈到超时」——两边都不报错。
+// 这是 TestCancelReleasesPendingApproval 偶发 30s 超时的根因。
+func TestUpdateRunTerminalIsSticky(t *testing.T) {
+	s := newTestStore(t)
+	_, rid := seedRun(t, s)
+	ctx := context.Background()
+
+	r, err := s.GetRun(ctx, rid)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	r.Status = RunCancelled
+	if err := s.UpdateRun(ctx, r); err != nil {
+		t.Fatalf("写终态: %v", err)
+	}
+
+	// 旧快照回写：模拟审批回调手里的 running 副本
+	stale := r
+	stale.Status = RunRunning
+	if err := s.UpdateRun(ctx, stale); err != nil {
+		t.Fatalf("旧快照回写: %v", err)
+	}
+	got, err := s.GetRun(ctx, rid)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.Status != RunCancelled {
+		t.Fatalf("终态被回写覆盖：want %s, got %s", RunCancelled, got.Status)
+	}
+
+	// 终态之间的更新仍然允许（收尾把 failed 修正成 cancelled 这类）
+	r.Status = RunFailed
+	if err := s.UpdateRun(ctx, r); err != nil {
+		t.Fatalf("终态之间更新: %v", err)
+	}
+	if got, _ := s.GetRun(ctx, rid); got.Status != RunFailed {
+		t.Fatalf("终态之间应当可更新，got %s", got.Status)
+	}
+}
+
+// 并发更新同一 run 不应产生坏 JSON，也不该让终态丢失。
+func TestUpdateRunConcurrentKeepsTerminal(t *testing.T) {
+	s := newTestStore(t)
+	_, rid := seedRun(t, s)
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			r, err := s.GetRun(ctx, rid)
+			if err != nil {
+				return
+			}
+			if i == 0 {
+				r.Status = RunCompleted
+			} else {
+				r.Status = RunRunning
+			}
+			_ = s.UpdateRun(ctx, r)
+		}(i)
+	}
+	wg.Wait()
+
+	got, err := s.GetRun(ctx, rid)
+	if err != nil {
+		t.Fatalf("并发写后读不出来（JSON 坏了）: %v", err)
+	}
+	if !IsTerminal(got.Status) {
+		t.Fatalf("并发写后终态丢了: %s", got.Status)
+	}
+}

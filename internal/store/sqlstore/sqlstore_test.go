@@ -936,3 +936,43 @@ func TestPostgres(t *testing.T) {
 		t.Fatalf("PG 按租户列会话不符: %+v %v", tenants, err)
 	}
 }
+
+// 终态不可逆（sqlstore 版）：非终态的写入不能覆盖已落库的终态。
+// 与 file store 的 TestUpdateRunTerminalIsSticky 同一语义——生产走 PG，
+// 少了这条保护，取消/失败后状态会被审批回调的旧快照顶回 running。
+func TestUpdateRunTerminalIsSticky(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open("sqlite://" + filepath.Join(t.TempDir(), "sticky.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	_, rid := seedSession(t, s)
+	r, err := s.GetRun(ctx, rid)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	r.Status = store.RunCancelled
+	if err := s.UpdateRun(ctx, r); err != nil {
+		t.Fatalf("写终态: %v", err)
+	}
+
+	stale := r
+	stale.Status = store.RunRunning
+	if err := s.UpdateRun(ctx, stale); err != nil {
+		t.Fatalf("旧快照回写: %v", err)
+	}
+	got, err := s.GetRun(ctx, rid)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if got.Status != store.RunCancelled {
+		t.Fatalf("终态被覆盖：want %s, got %s", store.RunCancelled, got.Status)
+	}
+
+	// 不存在的 run 仍然要报 ErrNotFound，不能因为「条件更新没命中」就静默成功
+	if err := s.UpdateRun(ctx, store.Run{ID: "nope", Status: store.RunRunning}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("未知 run 应 ErrNotFound，实际 %v", err)
+	}
+}

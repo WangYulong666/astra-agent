@@ -75,6 +75,17 @@ func (g *cancelGate) afterPrompt(runID string) bool {
 	return s.cancel
 }
 
+// cancelled 报告这一轮是否已被请求取消。
+//
+// 审批回调需要它：结论是 deny 时通常要把 run 置回 running（agent 会换个工具继续），
+// 但如果用户已经取消，置 running 就是错的——收尾马上会写 cancelled，
+// 两边一撞就成了「终态被覆盖回 running」。
+func (g *cancelGate) cancelled(runID string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.get(runID).cancel
+}
+
 // forget 在本轮结束后清理，避免长跑进程里地图无限增长。
 func (g *cancelGate) forget(runID string) {
 	g.mu.Lock()

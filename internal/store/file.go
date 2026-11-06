@@ -231,14 +231,30 @@ func (f *File) UpdateRun(ctx context.Context, r Run) error {
 	if err != nil {
 		return err
 	}
-	// 别把内存里可能更新的 nextSeq 写回去覆盖——以已落库事件为准
+	// 整个「读旧值 → 合并 → 落盘」必须在锁里：writeJSON 是整对象覆盖，
+	// 两个协程同时更新同一 run 时，后写的旧快照会把先写的字段顶掉。
 	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	// 别把内存里可能更新的 nextSeq 写回去覆盖——以已落库事件为准
 	if rf, ok := f.runs[r.ID]; ok {
 		rf.mu.Lock()
 		r.NextSeq = rf.nextSeq
 		rf.mu.Unlock()
 	}
-	f.mu.Unlock()
+
+	// 终态不可逆：库里已经是终态时，拒绝把它改回非终态。
+	//
+	// 真实事故：审批回调跑在 ACP 读循环的 goroutine 上，run 收尾跑在 run 自己的
+	// goroutine 上。用户取消 → 审批被 deny → 回调把状态置回 running（它手里的
+	// 快照还是 waiting_approval），如果这次写入落在收尾写 cancelled 之后，
+	// 库里就回到 running。表现是「日志说结束了，客户端轮询一直转圈直到超时」，
+	// 而两边都没报错——查起来极费劲（TestCancelReleasesPendingApproval 偶发 30s 超时）。
+	var cur Run
+	if err := readJSON(filepath.Join(path, "run.json"), &cur); err == nil &&
+		IsTerminal(cur.Status) && !IsTerminal(r.Status) {
+		return nil
+	}
 	return writeJSON(filepath.Join(path, "run.json"), r)
 }
 

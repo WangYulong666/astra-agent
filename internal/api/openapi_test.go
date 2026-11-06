@@ -106,6 +106,16 @@ var codeRoutes = []string{
 	"GET /v1/admin/lifecycle",
 	"POST /v1/admin/lifecycle/sweep",
 
+	// 长期记忆：全部按登录身份的 tenant+user 过滤，不接受请求体传用户
+	"POST /v1/memory/ingest",
+	"GET /v1/memory/search",
+	"GET /v1/memory/stats",
+	"DELETE /v1/memory/{id}",
+
+	// 观测：运营页反查 trace（secret key 留服务端）
+	"GET /v1/admin/obs/config",
+	"GET /v1/admin/obs/traces",
+
 	"GET /v1/llm/{path}",
 	"POST /v1/llm/{path}",
 	"DELETE /v1/llm/{path}",
@@ -614,6 +624,10 @@ func probeURL(p, method, sessID, doomedID, runID string) (string, bool) {
 		}
 		return strings.ReplaceAll(p, "{id}", sid), true
 	case p == "/v1/sandboxes/{id}", strings.HasPrefix(p, "/v1/admin/"):
+		return strings.ReplaceAll(p, "{id}", probeDummyID), true
+	// 记忆的 {id} 用假 id：记忆未启用时 handler 回 503，启用时回 404，
+	// 两种都算「路由存在」，探针只关心这一点。
+	case strings.HasPrefix(p, "/v1/memory/"):
 		return strings.ReplaceAll(p, "{id}", probeDummyID), true
 	}
 	// 不含参数的路径；含 { 说明有未处理的模板。

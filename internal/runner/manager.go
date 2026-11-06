@@ -924,8 +924,12 @@ wait:
 		"decision":   decision,
 		"by":         by,
 	})
-	m.setRunStatus(runID, store.RunRunning)
-	s.event(store.EventState, map[string]any{"status": store.RunRunning})
+	// 有取消意图时不要置回 running：收尾会立刻写 cancelled，
+	// 中间这次写入除了制造竞态没有别的作用（见 store 侧「终态不可逆」的注释）。
+	if !m.gate.cancelled(runID) {
+		m.setRunStatus(runID, store.RunRunning)
+		s.event(store.EventState, map[string]any{"status": store.RunRunning})
+	}
 
 	if decision == DecisionAllow {
 		if opt, ok := p.Select(acp.KindAllowOnce); ok {
