@@ -1915,3 +1915,157 @@ kbd {
   color: var(--text);
   background: var(--t-sunken);
 }
+
+/* ═══ 语音工具条（voice） ═══════════════════════════════════
+   只做视觉：颜色、过渡、动效。尺寸与布局在 styles.css 里。
+   动效一律只动 transform / opacity —— 这条工具条就贴在输入框上方，
+   任何会改变盒模型的动画都会让下面的输入框跟着跳。 */
+
+.voice-mic,
+.voice-tts {
+  color: var(--muted);
+  background: var(--panel-2);
+  transition:
+    color 0.15s,
+    background 0.15s,
+    border-color 0.15s;
+}
+
+.voice-mic:not(:disabled):hover,
+.voice-tts:not(:disabled):hover {
+  color: var(--text);
+  background: var(--elev);
+}
+
+/* 录音中：实心红 + 一圈向外扩散的描边。扩散圈只改 transform/opacity，
+   合成器就能处理，不用重排。 */
+.voice-mic.listening {
+  color: #fff;
+  background: #d9444a;
+  border-color: #d9444a;
+}
+
+.voice-mic.listening::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  border: 2px solid #e5484d;
+  pointer-events: none;
+  animation: voice-pulse 1.4s ease-out infinite;
+}
+
+@keyframes voice-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.65;
+  }
+  70%,
+  100% {
+    transform: scale(1.45);
+    opacity: 0;
+  }
+}
+
+@keyframes voice-wave {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+    opacity: 0.65;
+  }
+  50% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+@keyframes voice-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.62;
+  }
+}
+
+.voice-timer {
+  color: #ff9a9a;
+}
+
+.voice-interim-text {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.voice-interim-cancel {
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--t-border-soft);
+  transition:
+    color 0.15s,
+    border-color 0.15s;
+}
+.voice-interim-cancel:hover {
+  color: var(--text);
+  border-color: var(--border-2);
+}
+
+/* 错误提示走 amber 而不是 red：说错话不是系统坏了，不值得用报错色。 */
+.voice-notice {
+  color: var(--amber);
+}
+
+.voice-lang {
+  color: var(--text-2);
+  background: var(--panel-2);
+  border: 1px solid var(--border-2);
+  transition: border-color 0.15s;
+}
+.voice-lang:hover:not(:disabled) {
+  border-color: var(--border-2);
+}
+
+/* 朗读开启：低调的强调色描边，不能太抢——它是常驻的开关，
+   不是一次性的动作按钮。 */
+.voice-tts.on {
+  color: var(--accent);
+  background: var(--t-accent-softer);
+  border-color: var(--t-accent-line);
+}
+.voice-tts.on:hover {
+  color: var(--t-accent-hover);
+}
+
+/* 正在念：轻微呼吸，用来区分「开着但没在念」和「正在念」。 */
+.voice-tts.speaking {
+  animation: voice-breathe 1.6s ease-in-out infinite;
+}
+
+.voice-mic:disabled,
+.voice-tts:disabled {
+  color: var(--t-text-faint);
+  background: var(--t-sunken-2);
+  opacity: 0.55;
+}
+
+.voice-mic:focus-visible,
+.voice-tts:focus-visible,
+.voice-lang:focus-visible,
+.voice-interim-cancel:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 系统开了「减少动态效果」就不闪：脉冲圈换成常亮描边，
+   波形和呼吸动画直接停。 */
+@media (prefers-reduced-motion: reduce) {
+  .voice-mic.listening::after,
+  .voice-wave i,
+  .voice-tts.speaking {
+    animation: none;
+  }
+  .voice-mic.listening::after {
+    opacity: 0.5;
+  }
+}

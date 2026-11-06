@@ -12,6 +12,7 @@ import { CommandPalette } from './components/CommandPalette'
 import type { PaletteSession } from './components/CommandPalette'
 import { IconFolder, IconRefresh } from './components/icons'
 import { copyText } from './components/ui'
+import { VoiceBar } from './voice/VoiceBar'
 
 // 示例指令。原则：点一下就能跑、跑完看得出效果，且都在沙箱工作区里发生。
 // 写成「你好」这类寒暄没有意义——那不叫演示能力，只是验证通路。
@@ -711,6 +712,16 @@ export default function App() {
             回到最新 ↓
           </button>
         )}
+
+        {/* 语音工具条：说话提问（STT）+ 朗读回复（TTS）。
+            自包含组件，只吃会话/运行状态，不往这里回写任何东西——
+            语音结果的落点是输入框和 Composer 自己的提交逻辑。 */}
+        <VoiceBar
+          sessionId={activeId}
+          runId={activeRun?.id ?? null}
+          running={running}
+          events={activeRun ? (events[activeRun.id] ?? []) : []}
+        />
 
         <Composer
           running={running}

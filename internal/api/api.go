@@ -19,11 +19,16 @@ import (
 	"time"
 
 	"github.com/WangYulong666/astra-agent/internal/auth"
+	"github.com/WangYulong666/astra-agent/internal/browser"
+	"github.com/WangYulong666/astra-agent/internal/connector"
+	"github.com/WangYulong666/astra-agent/internal/distill"
+	"github.com/WangYulong666/astra-agent/internal/egress"
 	"github.com/WangYulong666/astra-agent/internal/eventbus"
 	"github.com/WangYulong666/astra-agent/internal/lifecycle"
 	"github.com/WangYulong666/astra-agent/internal/memory"
 	"github.com/WangYulong666/astra-agent/internal/runner"
 	"github.com/WangYulong666/astra-agent/internal/sandbox"
+	"github.com/WangYulong666/astra-agent/internal/schedule"
 	"github.com/WangYulong666/astra-agent/internal/store"
 	"github.com/WangYulong666/astra-agent/internal/trace"
 )
@@ -58,6 +63,19 @@ type Config struct {
 	Trace trace.Tracer
 	// TraceEndpoint / TraceDashboardURL / TracePublicKey 只用于运营页展示；
 	// secret key 留在服务端，不进这个结构。
+	// Egress 出网管控。nil 表示未启用（沙箱直连）。
+	Egress egress.Controller
+	// Schedules / Scheduler 定时与 webhook 触发。
+	Schedules schedule.Store
+	Scheduler schedule.Scheduler
+	// Distiller 从 run 轨迹沉淀技能草稿。
+	Distiller distill.Distiller
+	// Connectors 第三方授权与凭据托管。
+	Connectors           connector.Manager
+	ConnectorRedirectURL string
+	// Browsers 给 agent 用的 CDP 浏览器实例。
+	Browsers browser.Manager
+
 	TraceEndpoint     string
 	TraceDashboardURL string
 	TracePublicKey    string
@@ -160,6 +178,41 @@ func Handler(cfg Config) (http.Handler, error) {
 	// ── 观测（Langfuse）──────────────────────────────────────────
 	mux.HandleFunc("GET /v1/admin/obs/config", h.authed(h.obsConfig, auth.ActionObsRead))
 	mux.HandleFunc("GET /v1/admin/obs/traces", h.authed(h.obsTraces, auth.ActionObsRead))
+
+	// ── 出网管控 ────────────────────────────────────────────────
+	// 读策略给所有登录用户（他要知道自己能不能装包），改策略只给管租户的人。
+	mux.HandleFunc("GET /v1/admin/egress/policy", h.authed(h.egressPolicy, auth.ActionSessionRead))
+	mux.HandleFunc("PUT /v1/admin/egress/policy", h.authed(h.putEgressPolicy, auth.ActionTenantManage))
+	mux.HandleFunc("GET /v1/admin/egress/log", h.authed(h.egressLog, auth.ActionAuditRead))
+
+	// ── 定时任务 / webhook 触发 ─────────────────────────────────
+	mux.HandleFunc("GET /v1/schedules", h.authed(h.listSchedules, auth.ActionSessionRead))
+	mux.HandleFunc("POST /v1/schedules", h.authed(h.createSchedule, auth.ActionRunCreate))
+	mux.HandleFunc("GET /v1/schedules/{id}", h.authed(h.getSchedule, auth.ActionSessionRead))
+	mux.HandleFunc("PATCH /v1/schedules/{id}", h.authed(h.patchSchedule, auth.ActionRunCreate))
+	mux.HandleFunc("DELETE /v1/schedules/{id}", h.authed(h.deleteSchedule, auth.ActionRunCreate))
+	mux.HandleFunc("POST /v1/schedules/{id}/run", h.authed(h.runScheduleNow, auth.ActionRunCreate))
+	// webhook 入口不经过 authed：调用方是外部系统，靠 URL 里的 token 鉴权
+	mux.HandleFunc("POST /v1/hooks/{token}", h.hookTrigger)
+
+	// ── 技能沉淀 ────────────────────────────────────────────────
+	mux.HandleFunc("POST /v1/runs/{id}/distill", h.authed(h.distillRun, auth.ActionSessionRead))
+	mux.HandleFunc("GET /v1/skills/drafts", h.authed(h.listSkillDrafts, auth.ActionSessionRead))
+	mux.HandleFunc("POST /v1/skills/drafts/{id}/accept", h.authed(h.acceptSkillDraft, auth.ActionSessionCreate))
+	mux.HandleFunc("POST /v1/skills/drafts/{id}/reject", h.authed(h.rejectSkillDraft, auth.ActionSessionCreate))
+
+	// ── 连接器 / 凭据托管 ───────────────────────────────────────
+	mux.HandleFunc("GET /v1/connectors", h.authed(h.listConnectors, auth.ActionSessionRead))
+	mux.HandleFunc("POST /v1/connectors/{name}/connect", h.authed(h.connectConnector, auth.ActionKeyManage))
+	mux.HandleFunc("POST /v1/connectors/{name}/key", h.authed(h.putConnectorKey, auth.ActionKeyManage))
+	mux.HandleFunc("DELETE /v1/connectors/{name}", h.authed(h.deleteConnector, auth.ActionKeyManage))
+	// OAuth 回调由浏览器直接访问，没有 Authorization 头，靠 state 鉴权
+	mux.HandleFunc("GET /v1/connectors/callback", h.connectorCallback)
+
+	// ── 浏览器 ──────────────────────────────────────────────────
+	mux.HandleFunc("POST /v1/sessions/{id}/browser", h.authed(h.launchBrowser, auth.ActionRunCreate))
+	mux.HandleFunc("GET /v1/sessions/{id}/browser", h.authed(h.getBrowser, auth.ActionSessionRead))
+	mux.HandleFunc("DELETE /v1/sessions/{id}/browser", h.authed(h.closeBrowser, auth.ActionRunCreate))
 
 	// 平台层路由（认证入口、管理面、沙箱、用量、契约、网关）在 platform_routes.go。
 	// 单独一个文件是因为这块会持续变长，塞进这里会把「运行时」和「治理」混在一起。

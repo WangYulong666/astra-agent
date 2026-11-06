@@ -4039,3 +4039,175 @@ kbd {
   flex: none;
   white-space: nowrap;
 }
+
+/* ═══ 语音工具条（voice） ═══════════════════════════════════
+   位置在输入框正上方、与之同宽右对齐：Composer 是受控组件，按钮塞不进它的
+   textarea 右侧（那要改它的 JSX），所以整条落在 composer-wrap 的上方，
+   视觉上仍是「输入区的右侧」。
+
+   可点区域一律 ≥44px：这是 iOS HIG 的下限，也是本项目 .send 在窄屏下的
+   高度——两排按钮高度不一致会让输入区看起来是歪的。 */
+
+.voice-bar {
+  flex: none;
+  padding: 0 24px;
+}
+
+.voice-bar-inner {
+  max-width: 880px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+/* 中间结果：占满整行靠左，长句最多两行，超出省略——它只是「让我看见
+   你在听」，不需要完整显示，最终文本会进输入框。 */
+.voice-interim {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.voice-interim-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.voice-interim-cancel {
+  flex: none;
+  height: 28px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border-radius: 7px;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.voice-notice {
+  width: 100%;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.voice-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.voice-lang {
+  height: 36px;
+  min-width: 74px;
+  padding: 0 6px;
+  border-radius: 9px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.voice-timer {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+/* 波形：四根等宽柱，靠 transform: scaleY 起伏（只动 transform，
+   不触发布局，连续动画时不会让输入区抖动）。 */
+.voice-wave {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 13px;
+}
+
+.voice-wave i {
+  display: block;
+  width: 3px;
+  height: 100%;
+  border-radius: 2px;
+  background: currentColor;
+  transform-origin: bottom;
+  animation: voice-wave 0.9s ease-in-out infinite;
+}
+.voice-wave i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.voice-wave i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+.voice-wave i:nth-child(4) {
+  animation-delay: 0.45s;
+}
+
+.voice-mic {
+  position: relative;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  border: 1px solid var(--border-2);
+  cursor: pointer;
+}
+
+.voice-tts {
+  flex: none;
+  height: 44px;
+  padding: 0 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 12px;
+  border: 1px solid var(--border-2);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.voice-mic:disabled,
+.voice-tts:disabled,
+.voice-lang:disabled {
+  cursor: not-allowed;
+}
+
+/* 393 与 composer-wrap 的 padding 对齐，保证工具条和输入框左右边缘齐平 */
+@media (max-width: 767px) {
+  .voice-bar {
+    padding: 0 10px;
+  }
+  .voice-bar-inner {
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 479px) {
+  .voice-bar {
+    padding: 0 8px;
+  }
+  /* 窄屏只留图标：44px 的方块本身就是完整的点击目标，文字会把
+     「朗读 / 语言 / 计时」挤成一条读不完的横排。 */
+  .voice-tts-label {
+    display: none;
+  }
+  .voice-tts {
+    width: 44px;
+    padding: 0;
+    justify-content: center;
+  }
+}

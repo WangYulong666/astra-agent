@@ -308,11 +308,11 @@ func New(cfg Config) (*Server, error) {
 
 	// 可选能力：配了就开、没配就关。任何一项起不来都只记日志，
 	// 不能让「没装 Milvus」变成「平台起不来」。
-	memStore, traceSink, traceInfo := openCapabilities(lg)
+	capa := openCapabilities(lg, st, mgr, cfg)
 	// 两个旁路都订阅 hub 的全局事件。Hub 已支持多消费者（追加语义），
 	// 谁先装配都不会把对方顶掉。
-	s.stopTrace = trace.Attach(s.hub, traceSink, st)
-	s.stopMem = memory.AttachWith(memStore, s.hub, st, lg)
+	s.stopTrace = trace.Attach(s.hub, capa.Trace, st)
+	s.stopMem = memory.AttachWith(capa.Memory, s.hub, st, lg)
 
 	info := map[string]string{
 		"provider":  prov.Name(),
@@ -321,8 +321,13 @@ func New(cfg Config) (*Server, error) {
 		"policy":    cfg.Policy,
 		"approval":  approvalGranularity(cfg.Agent, cfg.Policy),
 		// 让前端/CLI 一眼看出哪些能力关着，而不是点了报 503 才发现
-		"memory": boolLabel(memStore != nil && !memory.IsDisabled(memStore)),
-		"trace":  boolLabel(traceSink != nil && traceSink.Enabled()),
+		"memory":     boolLabel(!memory.IsDisabled(capa.Memory)),
+		"trace":      boolLabel(capa.Trace.Enabled()),
+		"egress":     boolLabel(capa.Egress != nil),
+		"scheduler":  boolLabel(capa.Scheduler != nil),
+		"distill":    boolLabel(capa.Distiller != nil),
+		"connectors": boolLabel(capa.Connectors != nil),
+		"browser":    boolLabel(capa.Browsers != nil),
 	}
 	h, err := api.Handler(api.Config{
 		Manager: mgr, Store: st, Hub: s.hub, Provider: prov, Logger: lg,
@@ -333,9 +338,11 @@ func New(cfg Config) (*Server, error) {
 		Quota:       quota,
 		Info:        info,
 		LLMSettings: s.LLMSettings(),
-		Memory:      memStore, Trace: traceSink,
-		TraceEndpoint: traceInfo.Endpoint, TraceDashboardURL: traceInfo.DashboardURL,
-		TracePublicKey: traceInfo.PublicKey,
+		Memory:      capa.Memory, Trace: capa.Trace,
+		TraceEndpoint: capa.TraceInfo.Endpoint, TraceDashboardURL: capa.TraceInfo.DashboardURL,
+		TracePublicKey: capa.TraceInfo.PublicKey,
+		Egress:         capa.Egress, Schedules: capa.Schedules, Scheduler: capa.Scheduler,
+		Distiller: capa.Distiller, Connectors: capa.Connectors, Browsers: capa.Browsers,
 	})
 	if err != nil {
 		st.Close()
