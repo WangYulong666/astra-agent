@@ -77,6 +77,12 @@ func (f fakeConnectors) Delete(context.Context, string, string, string) error   
 func (f fakeConnectors) Inject(context.Context, string, string, []string) (map[string]string, error) {
 	return nil, f.injectErr
 }
+func (f fakeConnectors) TokenFor(context.Context, string, string, string) (string, error) {
+	return "", errors.New("not used")
+}
+func (f fakeConnectors) ConnectorForHost(string) (connector.Connector, bool) {
+	return connector.Connector{}, false
+}
 
 func TestCreateSessionInjectsPerSessionEgress(t *testing.T) {
 	eg := &fakeEgress{addr: "127.0.0.1:17890", enabled: true}

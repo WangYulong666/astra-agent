@@ -75,6 +75,13 @@ type Config struct {
 	DefaultPolicy Policy
 	// LogSize 内存里保留多少条审计（环形缓冲）；0 用默认 5000。
 	LogSize int
+	// Approver 为 nil 时 Ask 降级为 Deny（reason=ask-no-approver）。
+	// 由 app 在 runner 建好后注入，见 ext.go 的依赖倒置说明。
+	Approver Approver
+	// TokenProvider 为 nil 时不启用凭据注入与 sidecar 端点。
+	TokenProvider TokenProvider
+	// AskTimeout 是一条出网审批的等待上限；0 用默认 5 分钟。
+	AskTimeout time.Duration
 }
 
 // Controller 是出网能力的对外面。

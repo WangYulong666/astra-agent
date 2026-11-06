@@ -18,8 +18,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/WangYulong666/astra-agent/internal/activity"
 	"github.com/WangYulong666/astra-agent/internal/auth"
 	"github.com/WangYulong666/astra-agent/internal/browser"
+	"github.com/WangYulong666/astra-agent/internal/collab"
 	"github.com/WangYulong666/astra-agent/internal/connector"
 	"github.com/WangYulong666/astra-agent/internal/distill"
 	"github.com/WangYulong666/astra-agent/internal/egress"
@@ -75,6 +77,9 @@ type Config struct {
 	ConnectorRedirectURL string
 	// Browsers 给 agent 用的 CDP 浏览器实例。
 	Browsers browser.Manager
+	// Collab 多 agent 协作（父 run 派生子 agent）；Ledger 用户视角行动账本。
+	Collab collab.Coordinator
+	Ledger activity.Ledger
 
 	TraceEndpoint     string
 	TraceDashboardURL string
@@ -208,6 +213,14 @@ func Handler(cfg Config) (http.Handler, error) {
 	mux.HandleFunc("DELETE /v1/connectors/{name}", h.authed(h.deleteConnector, auth.ActionKeyManage))
 	// OAuth 回调由浏览器直接访问，没有 Authorization 头，靠 state 鉴权
 	mux.HandleFunc("GET /v1/connectors/callback", h.connectorCallback)
+
+	// ── 多 agent 协作 ───────────────────────────────────────────
+	mux.HandleFunc("POST /v1/runs/{id}/children", h.authed(h.spawnChild, auth.ActionRunCreate))
+	mux.HandleFunc("GET /v1/runs/{id}/children", h.authed(h.listChildren, auth.ActionSessionRead))
+
+	// ── 行动账本（用户视角）─────────────────────────────────────
+	mux.HandleFunc("GET /v1/runs/{id}/activity", h.authed(h.runActivity, auth.ActionSessionRead))
+	mux.HandleFunc("GET /v1/sessions/{id}/activity", h.authed(h.sessionActivity, auth.ActionSessionRead))
 
 	// ── 浏览器 ──────────────────────────────────────────────────
 	mux.HandleFunc("POST /v1/sessions/{id}/browser", h.authed(h.launchBrowser, auth.ActionRunCreate))

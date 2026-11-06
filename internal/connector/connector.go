@@ -41,6 +41,16 @@ type Connector struct {
 	EnvNames []string `json:"env_names"`
 	// DocsURL 在 CLI/前端提示「去哪拿 key」。
 	DocsURL string `json:"docs_url,omitempty"`
+	// Hosts 是该连接器的上游 API 域名（不含端口、支持 *. 前缀通配）。
+	// 代理按它决定「这个请求该注入谁的 token」，也用于 sidecar 的 host 校验。
+	// 没有 Hosts 的连接器不参与代理注入。
+	Hosts []string `json:"hosts,omitempty"`
+	// APIBase 是上游 API 基址，供本地 sidecar 端点转发，如
+	// "https://api.github.com"。必须是 https，且只允许 Hosts 里的域名。
+	APIBase string `json:"api_base,omitempty"`
+	// AuthHeader 是注入的 header 名，如 "Authorization" / "Notion-Version" 之外
+	// 的 token header。空则用 "Authorization"。
+	AuthHeader string `json:"auth_header,omitempty"`
 }
 
 // Credential 是某用户对某连接器的授权。
@@ -87,7 +97,13 @@ type Manager interface {
 	PutKey(ctx context.Context, tenantID, userID, name, key string) error
 	Delete(ctx context.Context, tenantID, userID, name string) error
 	// Inject 返回要注入沙箱的环境变量。mode 由配置决定。
+	// proxy 模式返回**不含任何 token** 的 sidecar 基址（如 GITHUB_API_BASE），
+	// env 模式才把明文 token 放进环境变量（有泄漏风险，仅可信 agent 用）。
 	Inject(ctx context.Context, tenantID, userID string, names []string) (map[string]string, error)
+	// TokenFor 取（必要时刷新）某用户对某连接器的明文 token。只给控制面用。
+	TokenFor(ctx context.Context, tenantID, userID, name string) (token string, err error)
+	// ConnectorForHost 按目标域名反查连接器定义。
+	ConnectorForHost(host string) (Connector, bool)
 }
 
 // Config 装配。
@@ -103,6 +119,9 @@ type Config struct {
 	BaseURL string
 	// InjectMode 见 InjectMode 注释，默认 proxy；代理不可用时降级 env 并告警。
 	InjectMode InjectMode
+	// SidecarBase 是出网代理的监听地址（host:port），用于拼 proxy 模式下的
+	// *_API_BASE。空表示代理没启用，此时 proxy 模式返回明确的错误而不是假地址。
+	SidecarBase string
 
 	// OAuth 应用凭据。空表示该连接器没配，List 里仍然显示但不可连接。
 	GoogleClientID, GoogleClientSecret string

@@ -143,6 +143,14 @@ var codeRoutes = []string{
 	"DELETE /v1/connectors/{name}",
 	"GET /v1/connectors/callback",
 
+	// 多 agent 协作：父 run 派生子 agent（归属由服务端从父会话继承）
+	"POST /v1/runs/{id}/children",
+	"GET /v1/runs/{id}/children",
+
+	// 行动账本：用户视角的「做了什么、卡在哪」
+	"GET /v1/runs/{id}/activity",
+	"GET /v1/sessions/{id}/activity",
+
 	// 浏览器：每会话一个隔离的 headless Chrome 实例
 	"POST /v1/sessions/{id}/browser",
 	"GET /v1/sessions/{id}/browser",

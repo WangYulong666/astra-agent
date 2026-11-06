@@ -15,7 +15,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/WangYulong666/astra-agent/internal/activity"
 	"github.com/WangYulong666/astra-agent/internal/browser"
+	"github.com/WangYulong666/astra-agent/internal/collab"
 	"github.com/WangYulong666/astra-agent/internal/connector"
 	"github.com/WangYulong666/astra-agent/internal/distill"
 	"github.com/WangYulong666/astra-agent/internal/egress"
@@ -115,7 +117,7 @@ func openObserve(lg *log.Logger) (memory.Store, trace.Tracer, capInfo) {
 
 // openEgress 只有显式配了监听地址才打开——没有地址就没有代理，
 // 沙箱也不会拿到 HTTP_PROXY，等于保持现状（直连）。
-func openEgress(lg *log.Logger) egress.Controller {
+func openEgress(lg *log.Logger, approver egress.Approver, tokens egress.TokenProvider) egress.Controller {
 	addr := os.Getenv("EGRESS_LISTEN_ADDR")
 	if addr == "" {
 		return nil
@@ -123,6 +125,9 @@ func openEgress(lg *log.Logger) egress.Controller {
 	ctl, err := egress.Open(egress.Config{
 		ListenAddr:    addr,
 		DefaultPolicy: egress.DefaultPolicy(),
+		Approver:      approver,
+		TokenProvider: tokens,
+		AskTimeout:    5 * time.Minute,
 	})
 	if err != nil {
 		lg.Printf("出网管控未启用: %v", err)
@@ -165,7 +170,7 @@ func openDistill(lg *log.Logger, st store.Store) distill.Distiller {
 	return d
 }
 
-func openConnectors(lg *log.Logger) connector.Manager {
+func openConnectors(lg *log.Logger, sidecarBase string) connector.Manager {
 	key := os.Getenv("ASTRA_VAULT_KEY")
 	if key == "" {
 		return nil // 没有主密钥就不做：明文存 token 不如不存
@@ -176,6 +181,7 @@ func openConnectors(lg *log.Logger) connector.Manager {
 		VaultPath:          envOr("ASTRA_VAULT_PATH", filepath.Join(homeDir(), ".astra", "vault.json")),
 		BaseURL:            os.Getenv("ASTRA_BASE_URL"),
 		InjectMode:         connector.InjectMode(envOr("CONNECTOR_INJECT_MODE", "proxy")),
+		SidecarBase:        sidecarBase,
 		GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 		GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
 		GitHubClientID:     os.Getenv("GITHUB_CLIENT_ID"),
@@ -257,4 +263,44 @@ func envBool(k string, def bool) bool {
 		}
 	}
 	return def
+}
+
+// openCollab 装配多 agent 协作。桩阶段返回错误，app 层降级为 nil。
+func openCollab(lg *log.Logger, mgr *runner.Manager, st store.Store, cfg Config) collab.Coordinator {
+	if !envBool("COLLAB_ENABLED", true) {
+		return nil
+	}
+	dir := filepath.Join(cfg.DataDir, "collab")
+	c, err := collab.Open(collab.Config{
+		Sessions: sessionsAdapter{mgr: mgr},
+		DataDir:  dir,
+		MaxDepth: envInt("COLLAB_MAX_DEPTH", 2),
+		Timeout:  time.Duration(envInt("COLLAB_TIMEOUT_MIN", 5)) * time.Minute,
+	}, st)
+	if err != nil {
+		lg.Printf("多 agent 协作未启用: %v", err)
+		return nil
+	}
+	lg.Printf("多 agent 协作已启用（最大派生深度 %d，数据 %s）",
+		envInt("COLLAB_MAX_DEPTH", 2), dir)
+	return c
+}
+
+// openActivity 装配用户视角行动账本。
+func openActivity(lg *log.Logger, st store.Store, egCtl egress.Controller,
+	coord collab.Coordinator) activity.Ledger {
+	var src activity.Sources
+	if egCtl != nil {
+		src.Egress = egressLogAdapter{ctl: egCtl}
+	}
+	if coord != nil {
+		src.Children = childListerAdapter{coord: coord}
+	}
+	l, err := activity.Open(st, src)
+	if err != nil {
+		lg.Printf("行动账本未启用: %v", err)
+		return nil
+	}
+	lg.Printf("行动账本已启用")
+	return l
 }

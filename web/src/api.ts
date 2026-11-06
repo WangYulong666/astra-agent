@@ -309,6 +309,9 @@ const EVENT_TYPES = [
   'approval_result',
   'agent_log',
   'error',
+  // 多 agent：子任务派生与回话，漏了会「派生了但页面上什么都不出现」
+  'child_spawned',
+  'child_result',
 ]
 
 export type StreamHandlers = {

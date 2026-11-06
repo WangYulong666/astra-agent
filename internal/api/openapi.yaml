@@ -58,6 +58,10 @@ tags:
     description: "第三方 OAuth / API key 托管，凭据加密保存。"
   - name: Browsers
     description: "每会话一个隔离的 headless Chrome 实例（CDP）。"
+  - name: Collab
+    description: "多 agent 协作：父 run 派生独立沙箱的子 agent 并等它回话。"
+  - name: Activity
+    description: "用户视角行动账本：做了什么、卡在哪、为什么停了。"
   - name: Meta
     description: "运行信息与契约本身。"
 
@@ -2004,6 +2008,95 @@ paths:
       responses:
         "204":
           description: "已关闭。"
+  /v1/runs/{id}/children:
+    post:
+      operationId: spawn_child
+      summary: "派生一个独立沙箱的子 agent，阻塞到它跑完并返回摘要。"
+      tags: [Collab]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "父 run id。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "201":
+          description: "子任务记录（含 runId / status / summary）。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    get:
+      operationId: list_children
+      summary: "列出某父 run 派生的所有子任务。"
+      tags: [Collab]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "父 run id。"
+      responses:
+        "200":
+          description: "子任务列表。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/runs/{id}/activity:
+    get:
+      operationId: get_run_activity
+      summary: "某 run 的用户视角行动时间线与状态摘要。"
+      tags: [Activity]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "run id。"
+      responses:
+        "200":
+          description: "条目列表 + 状态计数与当前阻塞项。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/sessions/{id}/activity:
+    get:
+      operationId: get_session_activity
+      summary: "某会话下所有 run 的聚合行动时间线。"
+      tags: [Activity]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "会话 id。"
+      responses:
+        "200":
+          description: "按时间排序的条目列表。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /v1/openapi.json:
     get:
       operationId: get_openapi

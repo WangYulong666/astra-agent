@@ -6,6 +6,8 @@ export type Session = {
   sandboxId: string
   agentSessionId: string
   title?: string
+  /** 非空表示这是父会话派生的子 agent（多 agent 协作）。 */
+  parentSessionId?: string
   cwd: string
   status: string
   createdAt: string
@@ -15,6 +17,8 @@ export type Session = {
 export type Run = {
   id: string
   sessionId: string
+  /** 非空表示由父 run 派生。 */
+  parentRunId?: string
   status: RunStatus
   input: string
   stopReason?: string

@@ -58,6 +58,10 @@ const (
 	EventAgentLog       = "agent_log"
 	EventError          = "error"
 	EventState          = "run_state"
+	// 多 agent：子任务派生与回话。分开两条是为了事件流 append-only——
+	// 刷新页面也能看出「派生了谁、隔了多久才回话」。
+	EventChildSpawned = "child_spawned"
+	EventChildResult  = "child_result"
 )
 
 // IsTerminal 表示 run 已结束，不可再变。
@@ -86,25 +90,30 @@ type Session struct {
 	// AgentSessionID 是 ACP 的 sessionId，与平台会话 id 不是一回事。
 	AgentSessionID string `json:"agentSessionId"`
 	// Title 是展示用标题。首次发指令时由输入自动生成，用户改过之后不再覆盖。
-	Title        string    `json:"title,omitempty"`
-	Cwd          string    `json:"cwd"`
-	Status       string    `json:"status"`
-	CreatedAt    time.Time `json:"createdAt"`
-	LastActiveAt time.Time `json:"lastActiveAt"`
+	Title string `json:"title,omitempty"`
+	// ParentSessionID 非空表示这是某个父会话派生的子 agent。
+	// 只用于展示与级联清理，不改变隔离边界（子会话仍是独立沙箱）。
+	ParentSessionID string    `json:"parentSessionId,omitempty"`
+	Cwd             string    `json:"cwd"`
+	Status          string    `json:"status"`
+	CreatedAt       time.Time `json:"createdAt"`
+	LastActiveAt    time.Time `json:"lastActiveAt"`
 }
 
 // Run 是一次 prompt 执行，也是事件流的归属单位。
 type Run struct {
-	ID         string    `json:"id"`
-	SessionID  string    `json:"sessionId"`
-	Status     string    `json:"status"`
-	Input      string    `json:"input"`
-	StopReason string    `json:"stopReason,omitempty"`
-	Error      string    `json:"error,omitempty"`
-	NextSeq    int64     `json:"nextSeq"`
-	CreatedAt  time.Time `json:"createdAt"`
-	StartedAt  time.Time `json:"startedAt,omitempty"`
-	EndedAt    time.Time `json:"endedAt,omitempty"`
+	ID        string `json:"id"`
+	SessionID string `json:"sessionId"`
+	// ParentRunID 指向派生这一轮的父 run。空表示用户直接发起的 run。
+	ParentRunID string    `json:"parentRunId,omitempty"`
+	Status      string    `json:"status"`
+	Input       string    `json:"input"`
+	StopReason  string    `json:"stopReason,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	NextSeq     int64     `json:"nextSeq"`
+	CreatedAt   time.Time `json:"createdAt"`
+	StartedAt   time.Time `json:"startedAt,omitempty"`
+	EndedAt     time.Time `json:"endedAt,omitempty"`
 }
 
 // Event 是一条已落库的事件。Seq 在 run 内单调连续，从 1 开始。

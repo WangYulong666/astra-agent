@@ -154,6 +154,9 @@ type CreateSessionOptions struct {
 	// 兼容模式（无认证）下为空，此时所有查询不做归属校验。
 	TenantID string
 	UserID   string
+	// ParentSessionID 非空表示这是某个父会话派生的子 agent（多 agent 协作）。
+	// 由服务端从父 run 继承，不接受 HTTP 请求体直接传。
+	ParentSessionID string
 	// Cwd 沙箱内的初始工作目录；空则用沙箱 workspace。
 	Cwd string
 	// Token acp-proxy 的凭据；空则由 provider 生成（生产里控制面不该知道明文）。
@@ -248,15 +251,16 @@ func (m *Manager) CreateSession(ctx context.Context, opts CreateSessionOptions) 
 
 	now := time.Now().UTC()
 	sess = store.Session{
-		ID:             id,
-		TenantID:       opts.TenantID,
-		UserID:         opts.UserID,
-		SandboxID:      id,
-		AgentSessionID: agentSID,
-		Cwd:            cwd,
-		Status:         store.SessionActive,
-		CreatedAt:      now,
-		LastActiveAt:   now,
+		ID:              id,
+		TenantID:        opts.TenantID,
+		UserID:          opts.UserID,
+		ParentSessionID: opts.ParentSessionID,
+		SandboxID:       id,
+		AgentSessionID:  agentSID,
+		Cwd:             cwd,
+		Status:          store.SessionActive,
+		CreatedAt:       now,
+		LastActiveAt:    now,
 	}
 	if err := m.cfg.Store.CreateSession(ctx, sess); err != nil {
 		_ = client.Conn().Close()
@@ -361,6 +365,13 @@ func (m *Manager) DeleteSession(ctx context.Context, id string) error {
 
 // StartRun 创建 run 并异步执行，立刻返回 runId 供客户端订阅事件。
 func (m *Manager) StartRun(ctx context.Context, sessionID, input string) (store.Run, error) {
+	return m.StartRunWithParent(ctx, sessionID, input, "")
+}
+
+// StartRunWithParent 与 StartRun 同语义，额外记录派生来源。
+// 拆成两个方法而不是给 StartRun 加参数：现有调用点（API / CLI / 调度器）很多，
+// 改签名会让它们全部跟着改，而 parentRunID 只在 collab 这一条链路上有意义。
+func (m *Manager) StartRunWithParent(ctx context.Context, sessionID, input, parentRunID string) (store.Run, error) {
 	if input == "" {
 		return store.Run{}, errors.New("runner: 输入为空")
 	}
@@ -381,11 +392,12 @@ func (m *Manager) StartRun(ctx context.Context, sessionID, input string) (store.
 	}
 
 	run := store.Run{
-		ID:        newID(),
-		SessionID: sessionID,
-		Status:    store.RunQueued,
-		Input:     input,
-		CreatedAt: time.Now().UTC(),
+		ID:          newID(),
+		SessionID:   sessionID,
+		ParentRunID: parentRunID,
+		Status:      store.RunQueued,
+		Input:       input,
+		CreatedAt:   time.Now().UTC(),
 	}
 	if err := m.cfg.Store.CreateRun(ctx, run); err != nil {
 		return store.Run{}, err

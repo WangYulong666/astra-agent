@@ -232,8 +232,16 @@ func New(cfg Config) (*Server, error) {
 
 	// 出网代理与连接器必须先于 runner.New 打开：runner 在 CreateSession
 	// 里按会话注入 HTTP_PROXY 并登记流量归属，装配晚了就注入不进去。
-	egCtl := openEgress(lg)
-	connMgr := openConnectors(lg)
+	egApprover := &lazyApprover{}
+	egTokens := &lazyTokenProvider{}
+	egCtl := openEgress(lg, egApprover, egTokens)
+	// connector 的 proxy 模式要把 sidecar 地址给沙箱；代理没启用时传空串，
+	// connector 会明确报错而不是给一个连不上的假地址。
+	sidecar := ""
+	if egCtl != nil {
+		sidecar = egCtl.Addr()
+	}
+	connMgr := openConnectors(lg, sidecar)
 	egBypass := egressBypassFor(cfg, lg)
 	if egCtl != nil && egBypass == "" {
 		lg.Printf("⚠ 出网管控已启用且 NO_PROXY 为空：沙箱连本机 LLM 网关会被私网规则拦截。" +
@@ -257,6 +265,13 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	s.mgr = mgr
+
+	// 到这里 runner / connector 都活了，把延迟适配器填实。
+	// 之前它们是空壳，行为保守（审批 deny、token 未授权），不会误放行。
+	egApprover.Set(approverAdapter{mgr: mgr})
+	if connMgr != nil {
+		egTokens.Set(tokenAdapter{mgr: connMgr})
+	}
 
 	// 上一个进程可能被直接杀掉，留下停在 running 的 run。先归档再接客。
 	if n, err := mgr.RecoverInterrupted(context.Background()); err != nil {
@@ -323,6 +338,8 @@ func New(cfg Config) (*Server, error) {
 	// 可选能力：配了就开、没配就关。任何一项起不来都只记日志，
 	// 不能让「没装 Milvus」变成「平台起不来」。
 	capa := openCapabilities(lg, st, mgr, cfg, egCtl, connMgr)
+	coord := openCollab(lg, mgr, st, cfg)
+	ledger := openActivity(lg, st, egCtl, coord)
 	// 两个旁路都订阅 hub 的全局事件。Hub 已支持多消费者（追加语义），
 	// 谁先装配都不会把对方顶掉。
 	s.stopTrace = trace.Attach(s.hub, capa.Trace, st)
@@ -342,6 +359,8 @@ func New(cfg Config) (*Server, error) {
 		"distill":    boolLabel(capa.Distiller != nil),
 		"connectors": boolLabel(capa.Connectors != nil),
 		"browser":    boolLabel(capa.Browsers != nil),
+		"collab":     boolLabel(coord != nil),
+		"activity":   boolLabel(ledger != nil),
 	}
 	h, err := api.Handler(api.Config{
 		Manager: mgr, Store: st, Hub: s.hub, Provider: prov, Logger: lg,
@@ -357,6 +376,7 @@ func New(cfg Config) (*Server, error) {
 		TracePublicKey: capa.TraceInfo.PublicKey,
 		Egress:         capa.Egress, Schedules: capa.Schedules, Scheduler: capa.Scheduler,
 		Distiller: capa.Distiller, Connectors: capa.Connectors, Browsers: capa.Browsers,
+		Collab: coord, Ledger: ledger,
 	})
 	if err != nil {
 		st.Close()
