@@ -252,9 +252,18 @@ func TestLaunchRealChrome(t *testing.T) {
 	if !waitGone(t, pid, 5*time.Second) {
 		t.Fatalf("Close 后 pid %d 仍然存活", pid)
 	}
-	// 强断言 2：user-data-dir 必须被删掉（cookie 不落地）
-	if _, err := os.Stat(userDataDir); !os.IsNotExist(err) {
-		t.Fatalf("Close 后 user-data-dir 仍存在: %s（err=%v）", userDataDir, err)
+	// 强断言 2：user-data-dir 必须被删掉（cookie 不落地）。
+	// 给 2 秒窗口是跨平台余量：Chrome 渲染子进程可能比主进程晚退，
+	// releaseDir 会重试删；超时仍存在就是真泄漏，必须红。
+	dirDeadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(userDataDir); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(dirDeadline) {
+			t.Fatalf("Close 2 秒后 user-data-dir 仍存在: %s", userDataDir)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	t.Logf("Close 后 pid %d 已回收，user-data-dir 已删除", pid)
 

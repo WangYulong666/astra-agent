@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -51,7 +52,8 @@ type instance struct {
 	waitErr error
 
 	removeDir bool
-	dirOnce   sync.Once
+	// dirMu 保护 releaseDir 可重复执行（不能用 sync.Once，见下）。
+	dirMu sync.Mutex
 
 	tenantID  string
 	userID    string
@@ -77,13 +79,34 @@ func (i *instance) snapshot() Session {
 	}
 }
 
-// releaseDir 删掉本实例独占的 user-data-dir（幂等）。
+// releaseDir 删掉本实例独占的 user-data-dir（幂等、可重复）。
 // 持久 profile（Profile 非空）不在此列，多次启动共用同一目录。
+//
+// 这里**不能**用 sync.Once 只删一次：cmd.Wait() 只回收 Chrome 主进程，
+// 渲染 / GPU / Zygote 子进程可能晚几百毫秒才退，期间会把 SingletonLock、
+// Cache 重新写回目录。Linux CI 上 --no-sandbox 时子进程尤其多（实测 10 个），
+// 出现过「Close 已经返回，os.Stat 却仍看得到 user-data-dir」——而 cookie
+// 隔离的承诺正是「目录确实没了」。所以 kill 之后做有界重试，超时记一句日志，
+// 不无限阻塞（平台退出路径不能被一个顽固目录卡死）。
 func (i *instance) releaseDir() {
 	if i == nil || !i.removeDir || i.dir == "" {
 		return
 	}
-	i.dirOnce.Do(func() { _ = os.RemoveAll(i.dir) })
+	i.dirMu.Lock()
+	defer i.dirMu.Unlock()
+	// 3 秒：Linux runner 上 --no-sandbox 会拉起 10+ 子进程，退出比 macOS 慢。
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		_ = os.RemoveAll(i.dir)
+		if _, err := os.Stat(i.dir); os.IsNotExist(err) {
+			return
+		}
+		if time.Now().After(deadline) {
+			log.Printf("browser: 关闭后 profile 目录仍存在（子进程可能还在退出）: %s", i.dir)
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // killProcess 先 SIGTERM 后 SIGKILL，并等到进程真的被回收。
