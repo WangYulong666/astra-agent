@@ -1,7 +1,9 @@
 package browser
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -198,12 +200,18 @@ func TestLocateChromePrecedence(t *testing.T) {
 }
 
 // TestLocateChromeMissing：什么都找不到时必须返回 ErrDisabled（app 层据此降级）。
+//
+// 这个场景要**测试自己构造**，不能指望跑测试的机器没装 Chrome——GitHub 的
+// ubuntu-latest 预装了 Chrome，之前按「本机没有」写的断言在 CI 上直接翻车。
+// Linux 的默认候选全是命令名（走 PATH），把 PATH 指到空目录就能确定地找不到；
+// macOS/Windows 查的是写死的绝对路径，无法用环境变量隔离，跳过。
 func TestLocateChromeMissing(t *testing.T) {
-	t.Setenv("CHROME_PATH", filepath.Join(t.TempDir(), "nope"))
-	// 把平台默认路径也指到不存在的地方：测试机器上装了 Chrome 时不应该假通过。
-	if runtime.GOOS == "darwin" {
-		t.Skip("默认路径写死在代码里，本机装了 Chrome 会命中；该场景由 TestOpenDisabled 覆盖")
+	if runtime.GOOS != "linux" {
+		t.Skip("默认候选是写死的绝对路径，无法构造「系统里没有 Chrome」")
 	}
+	empty := t.TempDir()
+	t.Setenv("CHROME_PATH", filepath.Join(empty, "nope"))
+	t.Setenv("PATH", empty)
 	_, err := locateChrome("")
 	if !errors.Is(err, ErrDisabled) {
 		t.Fatalf("期望 ErrDisabled，得到 %v", err)
@@ -246,5 +254,34 @@ func TestChromeArgs(t *testing.T) {
 	}
 	if strings.Contains(joined, "--headless") {
 		t.Fatalf("Headless=false 不应加 headless 参数: %s", joined)
+	}
+}
+
+// 启动失败时错误信息必须带上 Chrome 的 stderr，否则 CI 上只能看到「超时」两个字。
+func TestStderrTailKeepsRecentLines(t *testing.T) {
+	tail := &stderrTail{}
+	for i := 0; i < 25; i++ {
+		tail.add(fmt.Sprintf("line-%d", i))
+	}
+	got := tail.String()
+	if strings.Contains(got, "line-0 |") || strings.Contains(got, "line-4") {
+		t.Fatalf("只应保留最后 20 行，实际: %s", got)
+	}
+	if !strings.Contains(got, "line-24") {
+		t.Fatalf("最新一行必须保留: %s", got)
+	}
+
+	// 模拟 drainDevTools 读到的混合输出：DevTools 行之外的原因也要留下
+	var buf bytes.Buffer
+	buf.WriteString("Failed to move to new namespace\n")
+	buf.WriteString("DevTools listening on ws://127.0.0.1:9222/devtools/browser/abc\n")
+	out := make(chan string, 1)
+	tail2 := &stderrTail{}
+	drainDevTools(&buf, out, tail2)
+	if !strings.Contains(tail2.String(), "Failed to move to new namespace") {
+		t.Fatalf("非 DevTools 行必须留下来: %s", tail2.String())
+	}
+	if ws := <-out; ws != "ws://127.0.0.1:9222/devtools/browser/abc" {
+		t.Fatalf("DevTools 地址解析不对: %q", ws)
 	}
 }

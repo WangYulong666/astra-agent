@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -138,6 +139,14 @@ func chromeArgs(dir string, headless bool, resolverRules string) []string {
 		"--disable-background-networking",
 		"--disable-sync",
 	)
+	if runtime.GOOS == "linux" {
+		// Linux 容器 / CI runner 里 Chrome 的 setuid sandbox 基本起不来
+		// （user namespace 常被 seccomp 挡住），不加这两条就永远等不到 DevTools 行，
+		// 症状是「10s 超时」而 stderr 里其实写着 Failed to move to new namespace。
+		// 安全边界由平台层提供（cube microVM / 沙箱），Chrome 自带沙箱是第二层；
+		// 何况每个实例都是独立 profile + 用完即删，本来就不该拿它当隔离边界。
+		args = append(args, "--no-sandbox", "--disable-setuid-sandbox")
+	}
 	if resolverRules != "" {
 		args = append(args, "--host-resolver-rules="+resolverRules)
 	}
@@ -274,18 +283,50 @@ func httpURLFromWS(ws string) string {
 	return "http://" + u.Host
 }
 
+// stderrTail 留下 Chrome stderr 的最后几行。
+//
+// 之前只挑 DevTools 那一行、其余全丢，于是 CI 上 Chrome 因为沙箱 / 缺动态库
+// 起不来时，错误信息只有「10s 没等到 DevTools 端点」，真实原因一个字都看不到。
+// 启动失败时把它拼进 error，下次红能直接定位，不用去翻需要 admin 权限的 job log。
+type stderrTail struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (t *stderrTail) add(line string) {
+	if line == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.lines = append(t.lines, line)
+	if len(t.lines) > 20 {
+		t.lines = t.lines[len(t.lines)-20:]
+	}
+}
+
+func (t *stderrTail) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.Join(t.lines, " | ")
+}
+
 // drainDevTools 逐行读 stderr，找到 DevTools 行后继续把管道读干净。
 // 必须一直读到 EOF：中途不读了，Chrome 往 stderr 写满 64KB 就会阻塞。
-func drainDevTools(r io.Reader, out chan<- string) {
+func drainDevTools(r io.Reader, out chan<- string, tail *stderrTail) {
 	defer close(out)
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	found := false
 	for sc.Scan() {
+		line := sc.Text()
+		if tail != nil {
+			tail.add(line)
+		}
 		if found {
 			continue
 		}
-		if ws, ok := parseDevToolsLine(sc.Text()); ok {
+		if ws, ok := parseDevToolsLine(line); ok {
 			found = true
 			select {
 			case out <- ws:
@@ -325,7 +366,8 @@ func startChrome(ctx context.Context, bin, dir string, removeDir, headless bool,
 	}()
 
 	lines := make(chan string, 1)
-	go drainDevTools(stderr, lines)
+	tail := &stderrTail{}
+	go drainDevTools(stderr, lines, tail)
 
 	abort := func(err error) (*instance, error) {
 		killProcess(inst)
@@ -351,11 +393,11 @@ func startChrome(ctx context.Context, bin, dir string, removeDir, headless bool,
 		case <-inst.done:
 			killProcess(inst) // 进程已经退了，这里只是确保子进程也被收走
 			inst.releaseDir()
-			return nil, fmt.Errorf("browser: Chrome 启动后立即退出: %v", inst.waitErr)
+			return nil, fmt.Errorf("browser: Chrome 启动后立即退出: %v；stderr: %s", inst.waitErr, tail.String())
 		case <-ctx.Done():
 			return abort(fmt.Errorf("browser: 启动被取消: %w", ctx.Err()))
 		case <-timer.C:
-			return abort(fmt.Errorf("browser: %s 内没等到 DevTools 端点（Chrome 可能被安全策略挡住）", launchTimeout))
+			return abort(fmt.Errorf("browser: %s 内没等到 DevTools 端点；Chrome stderr: %s", launchTimeout, tail.String()))
 		}
 	}
 }
