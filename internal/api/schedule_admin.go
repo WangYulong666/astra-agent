@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -75,8 +76,16 @@ func (h *handler) createSchedule(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "session_id 必填：定时任务复用一个会话的工作区")
 		return
 	}
-	// 会话必须属于调用者，否则等于允许往别人会话里定时注入指令
-	if _, ok := h.getOwnedSession(w, r); !ok {
+	// 会话必须属于调用者，否则等于允许往别人会话里定时注入指令。
+	// 校验的是 body 里的 session_id（路由可能挂在 /v1/schedules 上，
+	// 也可能挂在 /v1/sessions/{id}/schedules 上，按 body 判断两种情况都对）。
+	sess, err := h.cfg.Manager.GetSession(r.Context(), req.SessionID)
+	if err != nil {
+		h.failErr(w, err)
+		return
+	}
+	if !h.canSee(h.principal(r), sess) {
+		fail(w, http.StatusNotFound, "会话不存在")
 		return
 	}
 	if req.Trigger == "" {
@@ -175,6 +184,11 @@ func (h *handler) patchSchedule(w http.ResponseWriter, r *http.Request) {
 		h.scheduleFail(w, err)
 		return
 	}
+	// 存储层可能重算了 NextRunAt（改 cron / 改时区 / 重新启用），
+	// 回读一次再吐给客户端，否则前端拿到的是旧的下次运行时间。
+	if fresh, err := h.cfg.Schedules.Get(r.Context(), s.ID); err == nil {
+		s = fresh
+	}
 	writeJSON(w, http.StatusOK, s)
 }
 
@@ -234,18 +248,31 @@ func (h *handler) hookTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 请求体作为额外上下文（可选）：非空时拼在指令后面，方便传 payload 摘要
+	extra := ""
 	if r.Body != nil {
 		if body, _ := io.ReadAll(io.LimitReader(r.Body, 8<<10)); len(body) > 0 {
-			s.Prompt = s.Prompt + "\n\n[webhook payload]\n" + string(body)
+			extra = string(body)
 		}
 	}
-	runID, err := h.cfg.Scheduler.RunNow(r.Context(), s.ID)
+	runID, err := h.runSchedule(r.Context(), s.ID, extra)
 	if err != nil {
 		h.scheduleFail(w, err)
 		return
 	}
 	h.audit(r, "schedule.hook", "schedule", s.ID, map[string]any{"run_id": runID})
 	writeJSON(w, http.StatusAccepted, map[string]string{"run_id": runID})
+}
+
+// runSchedule 触发一次。webhook 带载荷时走 PromptRunner 扩展接口：
+// Scheduler 接口（冻结）上的 RunNow 没有载荷入参，载荷只能从这条旁路进。
+// 载荷只对这一次生效，不写回 schedule 的 prompt 模板。
+func (h *handler) runSchedule(ctx context.Context, id, extra string) (string, error) {
+	if extra != "" {
+		if pr, ok := h.cfg.Scheduler.(schedule.PromptRunner); ok {
+			return pr.RunNowWithPrompt(ctx, id, extra)
+		}
+	}
+	return h.cfg.Scheduler.RunNow(ctx, id)
 }
 
 func (h *handler) ownedSchedule(w http.ResponseWriter, r *http.Request) (schedule.Schedule, bool) {
@@ -266,6 +293,16 @@ func (h *handler) ownedSchedule(w http.ResponseWriter, r *http.Request) (schedul
 func (h *handler) scheduleFail(w http.ResponseWriter, err error) {
 	if errors.Is(err, schedule.ErrNotFound) || errors.Is(err, store.ErrNotFound) {
 		fail(w, http.StatusNotFound, "定时任务不存在")
+		return
+	}
+	// 调用方写错了（cron 表达式非法、缺字段）：400，不要走 500。
+	if errors.Is(err, schedule.ErrInvalid) || errors.Is(err, schedule.ErrNoNext) {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// 配额满了属于「当前状态冲突」，409 比 500 有意义。
+	if errors.Is(err, schedule.ErrQuota) {
+		fail(w, http.StatusConflict, err.Error())
 		return
 	}
 	h.failErr(w, err)

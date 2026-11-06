@@ -48,6 +48,16 @@ tags:
     description: "长期记忆（向量检索）。只读写当前登录用户自己的记忆，租户按 partition key 隔离。"
   - name: Observability
     description: "Langfuse 观测。secret key 留在服务端，浏览器与 CLI 只拿到代理结果。"
+  - name: Egress
+    description: "沙箱出网管控：租户级域名策略与逐条出网审计。"
+  - name: Schedules
+    description: "定时任务与 webhook 触发，让 agent 自己启动。"
+  - name: Skills
+    description: "从 run 轨迹沉淀技能草稿，人工确认后才落地。"
+  - name: Connectors
+    description: "第三方 OAuth / API key 托管，凭据加密保存。"
+  - name: Browsers
+    description: "每会话一个隔离的 headless Chrome 实例（CDP）。"
   - name: Meta
     description: "运行信息与契约本身。"
 
@@ -1581,6 +1591,419 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /v1/admin/egress/policy:
+    get:
+      operationId: get_egress_policy
+      summary: "读当前租户的出网策略（默认 deny 加域名白名单）。"
+      tags: [Egress]
+      responses:
+        "200":
+          description: "策略。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      operationId: put_egress_policy
+      summary: "覆盖当前租户的出网策略。"
+      tags: [Egress]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: "已保存。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/admin/egress/log:
+    get:
+      operationId: list_egress_log
+      summary: "出网审计日志，按时间倒序。"
+      tags: [Egress]
+      parameters:
+        - name: limit
+          in: query
+          required: true
+          schema:
+            type: integer
+          description: "返回条数上限。"
+      responses:
+        "200":
+          description: "最近的出网记录。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/schedules:
+    get:
+      operationId: list_schedules
+      summary: "列出当前租户的定时任务。"
+      tags: [Schedules]
+      responses:
+        "200":
+          description: "任务列表。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      operationId: create_schedule
+      summary: "新建定时任务（cron 或 webhook）。"
+      tags: [Schedules]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "201":
+          description: "已创建，返回下次触发时间与 hook token。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/schedules/{id}:
+    get:
+      operationId: get_schedule
+      summary: "查一条定时任务。"
+      tags: [Schedules]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "资源标识。"
+      responses:
+        "200":
+          description: "任务详情。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      operationId: patch_schedule
+      summary: "改 cron 表达式、指令或启停。"
+      tags: [Schedules]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "资源标识。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: "已更新。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      operationId: delete_schedule
+      summary: "删除定时任务。"
+      tags: [Schedules]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "资源标识。"
+      responses:
+        "204":
+          description: "已删除。"
+  /v1/schedules/{id}/run:
+    post:
+      operationId: run_schedule_now
+      summary: "立即触发一次，不改变下次触发时间。"
+      tags: [Schedules]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "资源标识。"
+      responses:
+        "201":
+          description: "已创建 run，返回 run_id。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/hooks/{token}:
+    post:
+      operationId: hook_trigger
+      summary: "外部系统通过 URL 里的 token 触发一次执行。"
+      tags: [Schedules]
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "创建 webhook 型任务时签发的随机 token。"
+      responses:
+        "202":
+          description: "已受理，返回 run_id。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/runs/{id}/distill:
+    post:
+      operationId: distill_run
+      summary: "从 run 的工具调用轨迹生成技能草稿。"
+      tags: [Skills]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "已结束的 run。"
+      responses:
+        "201":
+          description: "草稿已生成，待人工确认。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/skills/drafts:
+    get:
+      operationId: list_skill_drafts
+      summary: "列出待确认的技能草稿。"
+      tags: [Skills]
+      responses:
+        "200":
+          description: "草稿列表。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/skills/drafts/{id}/accept:
+    post:
+      operationId: accept_skill_draft
+      summary: "确认草稿，写成 SKILL.md 落地。"
+      tags: [Skills]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "资源标识。"
+      responses:
+        "200":
+          description: "已落地，返回文件路径。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/skills/drafts/{id}/reject:
+    post:
+      operationId: reject_skill_draft
+      summary: "丢弃草稿。"
+      tags: [Skills]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "资源标识。"
+      responses:
+        "200":
+          description: "已丢弃。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/connectors:
+    get:
+      operationId: list_connectors
+      summary: "列出内置连接器及当前用户的授权状态。"
+      tags: [Connectors]
+      responses:
+        "200":
+          description: "连接器列表，不含任何 token。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/connectors/{name}/connect:
+    post:
+      operationId: connect_connector
+      summary: "发起 OAuth 授权，返回跳转地址。"
+      tags: [Connectors]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "连接器名，如 github。"
+      responses:
+        "200":
+          description: "授权地址。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/connectors/{name}/key:
+    post:
+      operationId: put_connector_key
+      summary: "为 API key 型连接器存一个 key。"
+      tags: [Connectors]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "连接器名，如 github。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: "已加密保存。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/connectors/{name}:
+    delete:
+      operationId: delete_connector
+      summary: "解除授权并删除凭据。"
+      tags: [Connectors]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "连接器名，如 github。"
+      responses:
+        "204":
+          description: "已删除。"
+  /v1/connectors/callback:
+    get:
+      operationId: connector_callback
+      summary: "OAuth 回调入口，靠签名的 state 鉴权，不需要登录态。"
+      tags: [Connectors]
+      responses:
+        "200":
+          description: "授权完成。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/sessions/{id}/browser:
+    post:
+      operationId: launch_browser
+      summary: "为会话起一个独立 profile 的 headless Chrome。"
+      tags: [Browsers]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "会话 id。"
+      responses:
+        "201":
+          description: "已启动，返回 CDP 地址。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    get:
+      operationId: get_browser
+      summary: "查当前会话的浏览器实例。"
+      tags: [Browsers]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "会话 id。"
+      responses:
+        "200":
+          description: "实例信息。"
+        "503":
+          description: "能力未启用（未配置或依赖不可用）。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      operationId: close_browser
+      summary: "关闭浏览器并删除临时 profile，登录态不残留。"
+      tags: [Browsers]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "会话 id。"
+      responses:
+        "204":
+          description: "已关闭。"
   /v1/openapi.json:
     get:
       operationId: get_openapi

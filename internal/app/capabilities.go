@@ -58,13 +58,17 @@ func (s runStarter) CreateRun(ctx context.Context, sessionID, prompt string) (st
 	return run.ID, nil
 }
 
-func openCapabilities(lg *log.Logger, st store.Store, mgr *runner.Manager, cfg Config) capabilities {
+// egCtl / connMgr 由 app.New 在 runner.New 之前打开并同时交给 runner，
+// 这里只是复用同一实例——绝不能二次 Open：代理会抢同一个监听端口，
+// 保管库会被两个实例各写一份，后者覆盖前者。
+func openCapabilities(lg *log.Logger, st store.Store, mgr *runner.Manager, cfg Config,
+	egCtl egress.Controller, connMgr connector.Manager) capabilities {
 	var c capabilities
 	c.Memory, c.Trace, c.TraceInfo = openObserve(lg)
-	c.Egress = openEgress(lg)
+	c.Egress = egCtl
 	c.Schedules, c.Scheduler = openScheduler(lg, mgr, cfg)
 	c.Distiller = openDistill(lg, st)
-	c.Connectors = openConnectors(lg)
+	c.Connectors = connMgr
 	c.Browsers = openBrowser(lg)
 	return c
 }

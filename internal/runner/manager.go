@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/WangYulong666/astra-agent/internal/acp"
+	"github.com/WangYulong666/astra-agent/internal/connector"
+	"github.com/WangYulong666/astra-agent/internal/egress"
 	"github.com/WangYulong666/astra-agent/internal/eventbus"
 	"github.com/WangYulong666/astra-agent/internal/obs"
 	"github.com/WangYulong666/astra-agent/internal/sandbox"
@@ -55,6 +57,16 @@ type Config struct {
 	// 签发失败**直接让创建失败**——静默放行会得到一个能起来但永远 401 的 agent，
 	// 用户看到的只是「模型不回话」，排查成本远高于当场报错。
 	Creds CredentialIssuer
+
+	// ── 出网管控与第三方凭据（可选）──────────────────────────
+	// 由 app 在 runner.New 之前装配好。nil 表示未启用：沙箱保持直连，
+	// 也不注入任何额外环境变量——能力关着时不能改变既有行为。
+	Egress     egress.Controller
+	Connectors connector.Manager
+	// EgressBypass 是 NO_PROXY 的值，默认空（严格，全部走代理）。
+	// 本地开发若 agent 通过 127.0.0.1 的 LLM 网关取模型，必须把该地址
+	// 填进来，否则代理的私网拦截会把网关一起挡掉（默认 deny）。
+	EgressBypass string
 }
 
 // Manager 管理全部会话。并发安全。
@@ -172,6 +184,29 @@ func (m *Manager) CreateSession(ctx context.Context, opts CreateSessionOptions) 
 		m.log.Printf("会话 %s 已签发沙箱凭据，有效期至 %s", id, expiresAt.Format(time.RFC3339))
 	}
 
+	// 出网代理：每个会话一个 nonce，凭据进 userinfo（客户端自动转成
+	// Proxy-Authorization），代理据此把流量归到租户/会话。
+	// 注意必须按会话生成，若把同一个 sandboxID 塞进共享的 cfg.Agent.Env，
+	// 所有会话的流量会挤在一个归属下，审计就失去意义。
+	if m.cfg.Egress != nil && m.cfg.Egress.Enabled() {
+		spec.Env = mergeEnv(spec.Env, egress.EnvForWithBypass(
+			m.cfg.Egress.Addr(), id, newNonce(), m.cfg.EgressBypass))
+	}
+
+	// 第三方凭据：只注入该 租户+用户 自己已授权的连接器。
+	// proxy 模式目前还没接 token 替换，Inject 会返回未实现——连接器是增强项，
+	// 绝不能让它把会话创建挡下来，所以这里只记日志。
+	if m.cfg.Connectors != nil && m.cfg.Connectors.Enabled() {
+		if names := m.connectedNames(ctx, opts.TenantID, opts.UserID); len(names) > 0 {
+			env, err := m.cfg.Connectors.Inject(ctx, opts.TenantID, opts.UserID, names)
+			if err != nil {
+				m.log.Printf("会话 %s 注入连接器凭据失败（不影响会话）: %v", id, err)
+			} else {
+				spec.Env = mergeEnv(spec.Env, env)
+			}
+		}
+	}
+
 	req := sandbox.CreateRequest{
 		ID:    id,
 		Agent: spec,
@@ -180,6 +215,12 @@ func (m *Manager) CreateSession(ctx context.Context, opts CreateSessionOptions) 
 	sb, err := m.cfg.Provider.Create(ctx, req)
 	if err != nil {
 		return sess, fmt.Errorf("起沙箱失败: %w", err)
+	}
+	// 登记放在 Create 成功之后：失败的沙箱不会留下孤立映射；
+	// 后续握手失败走 cleanupSandbox 统一注销。runID 此刻还不存在，
+	// StartRun 会用真正的 runID 覆盖。
+	if m.cfg.Egress != nil && m.cfg.Egress.Enabled() {
+		m.cfg.Egress.Register(id, opts.TenantID, opts.UserID, id, "")
 	}
 
 	info, ierr := sb.Info(ctx)
@@ -300,6 +341,9 @@ func (m *Manager) DeleteSession(ctx context.Context, id string) error {
 	}
 
 	derr := m.cfg.Provider.Destroy(ctx, id)
+	if m.cfg.Egress != nil {
+		m.cfg.Egress.Unregister(id)
+	}
 	if derr != nil && !errors.Is(derr, sandbox.ErrNotFound) {
 		return fmt.Errorf("销毁沙箱失败: %w", derr)
 	}
@@ -345,6 +389,11 @@ func (m *Manager) StartRun(ctx context.Context, sessionID, input string) (store.
 	}
 	if err := m.cfg.Store.CreateRun(ctx, run); err != nil {
 		return store.Run{}, err
+	}
+	// 出网审计带上 runID：同一会话并发多个 run 时后写的赢，
+	// 但至少能把流量定位到「最近一轮」，比只有 sessionID 强。
+	if m.cfg.Egress != nil && m.cfg.Egress.Enabled() && sess.SandboxID != "" {
+		m.cfg.Egress.Register(sess.SandboxID, sess.TenantID, sess.UserID, sessionID, run.ID)
 	}
 
 	m.wg.Add(1)
@@ -714,6 +763,28 @@ func (m *Manager) dial(ctx context.Context, sb sandbox.Sandbox) (*acp.Client, er
 	return client, nil
 }
 
+// newNonce 生成每条沙箱独立的代理凭据片段。
+func newNonce() string {
+	var b [12]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+// connectedNames 列出该用户已授权的连接器名，交给 Inject 决定注入哪些 env。
+// 读失败只记日志：没连上连接器不该影响会话创建。
+func (m *Manager) connectedNames(ctx context.Context, tenantID, userID string) []string {
+	creds, err := m.cfg.Connectors.ListCredentials(ctx, tenantID, userID)
+	if err != nil {
+		m.log.Printf("读连接器凭据列表失败（不影响会话）: %v", err)
+		return nil
+	}
+	out := make([]string, 0, len(creds))
+	for _, c := range creds {
+		out = append(out, c.Name)
+	}
+	return out
+}
+
 // mergeEnv 把 over 合并进 base 的副本，同名以 over 为准。
 //
 // 必须返回副本：AgentSpec 是 Manager 级别的共享值，就地改会让下一个会话
@@ -731,6 +802,9 @@ func mergeEnv(base, over map[string]string) map[string]string {
 
 func (m *Manager) cleanupSandbox(sb sandbox.Sandbox) {
 	_ = sb.Close()
+	if m.cfg.Egress != nil {
+		m.cfg.Egress.Unregister(sb.ID())
+	}
 	if err := m.cfg.Provider.Destroy(context.WithoutCancel(m.baseCtx), sb.ID()); err != nil &&
 		!errors.Is(err, sandbox.ErrNotFound) {
 		m.log.Printf("清理沙箱 %s 失败: %v", sb.ID(), err)

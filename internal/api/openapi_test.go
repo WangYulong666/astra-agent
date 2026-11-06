@@ -116,6 +116,38 @@ var codeRoutes = []string{
 	"GET /v1/admin/obs/config",
 	"GET /v1/admin/obs/traces",
 
+	// 出网管控：策略读写与审计日志（读写权限分开）
+	"GET /v1/admin/egress/policy",
+	"PUT /v1/admin/egress/policy",
+	"GET /v1/admin/egress/log",
+
+	// 调度：cron / webhook 触发，让 agent 自己启动
+	"GET /v1/schedules",
+	"POST /v1/schedules",
+	"GET /v1/schedules/{id}",
+	"PATCH /v1/schedules/{id}",
+	"DELETE /v1/schedules/{id}",
+	"POST /v1/schedules/{id}/run",
+	"POST /v1/hooks/{token}",
+
+	// 技能沉淀：轨迹 → 草稿 → 人工确认才落地
+	"POST /v1/runs/{id}/distill",
+	"GET /v1/skills/drafts",
+	"POST /v1/skills/drafts/{id}/accept",
+	"POST /v1/skills/drafts/{id}/reject",
+
+	// 连接器：OAuth / API key 托管。callback 由浏览器直接访问，靠 state 鉴权
+	"GET /v1/connectors",
+	"POST /v1/connectors/{name}/connect",
+	"POST /v1/connectors/{name}/key",
+	"DELETE /v1/connectors/{name}",
+	"GET /v1/connectors/callback",
+
+	// 浏览器：每会话一个隔离的 headless Chrome 实例
+	"POST /v1/sessions/{id}/browser",
+	"GET /v1/sessions/{id}/browser",
+	"DELETE /v1/sessions/{id}/browser",
+
 	"GET /v1/llm/{path}",
 	"POST /v1/llm/{path}",
 	"DELETE /v1/llm/{path}",
@@ -629,6 +661,14 @@ func probeURL(p, method, sessID, doomedID, runID string) (string, bool) {
 	// 两种都算「路由存在」，探针只关心这一点。
 	case strings.HasPrefix(p, "/v1/memory/"):
 		return strings.ReplaceAll(p, "{id}", probeDummyID), true
+	// 新版能力：能力关闭时 handler 回 503 JSON，探针只关心「路由存在」，
+	// 所以占位符填个不会被误认成真资源的假值即可。
+	case strings.HasPrefix(p, "/v1/schedules/"), strings.HasPrefix(p, "/v1/skills/drafts/"):
+		return strings.ReplaceAll(p, "{id}", probeDummyID), true
+	case p == "/v1/hooks/{token}":
+		return "/v1/hooks/probe-token", true
+	case strings.HasPrefix(p, "/v1/connectors/"):
+		return strings.ReplaceAll(p, "{name}", "github"), true
 	}
 	// 不含参数的路径；含 { 说明有未处理的模板。
 	return p, !strings.Contains(p, "{")

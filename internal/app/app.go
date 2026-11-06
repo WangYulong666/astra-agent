@@ -17,6 +17,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -229,14 +230,27 @@ func New(cfg Config) (*Server, error) {
 			"在配置里填 key，或开 LLMGateway 让沙箱只拿虚拟 key")
 	}
 
+	// 出网代理与连接器必须先于 runner.New 打开：runner 在 CreateSession
+	// 里按会话注入 HTTP_PROXY 并登记流量归属，装配晚了就注入不进去。
+	egCtl := openEgress(lg)
+	connMgr := openConnectors(lg)
+	egBypass := egressBypassFor(cfg, lg)
+	if egCtl != nil && egBypass == "" {
+		lg.Printf("⚠ 出网管控已启用且 NO_PROXY 为空：沙箱连本机 LLM 网关会被私网规则拦截。" +
+			"若 agent 通过本地网关取模型，请设 EGRESS_NO_PROXY=127.0.0.1:<port>")
+	}
+
 	mgr, err := runner.New(runner.Config{
-		Store:    st,
-		Provider: prov,
-		Hub:      s.hub,
-		Agent:    spec,
-		Policy:   runner.PolicyByName(cfg.Policy),
-		Logger:   lg,
-		Creds:    creds,
+		Store:        st,
+		Provider:     prov,
+		Hub:          s.hub,
+		Agent:        spec,
+		Policy:       runner.PolicyByName(cfg.Policy),
+		Logger:       lg,
+		Creds:        creds,
+		Egress:       egCtl,
+		Connectors:   connMgr,
+		EgressBypass: egBypass,
 	})
 	if err != nil {
 		st.Close()
@@ -308,7 +322,7 @@ func New(cfg Config) (*Server, error) {
 
 	// 可选能力：配了就开、没配就关。任何一项起不来都只记日志，
 	// 不能让「没装 Milvus」变成「平台起不来」。
-	capa := openCapabilities(lg, st, mgr, cfg)
+	capa := openCapabilities(lg, st, mgr, cfg, egCtl, connMgr)
 	// 两个旁路都订阅 hub 的全局事件。Hub 已支持多消费者（追加语义），
 	// 谁先装配都不会把对方顶掉。
 	s.stopTrace = trace.Attach(s.hub, capa.Trace, st)
@@ -580,4 +594,30 @@ func bootstrapIfEmpty(lg *log.Logger, st store.AdminStore) error {
 `, pw)
 	lg.Printf("已播种默认租户 default 与管理员 admin@astra.local")
 	return nil
+}
+
+// egressBypassFor 决定 NO_PROXY：显式环境变量优先，否则在 LLM 网关指向本机时
+// 自动放行那一个 host:port。
+//
+// 为什么需要：出网代理默认 deny + 拦私网，而本地开发的 agent 常通过
+// 127.0.0.1:<port>/v1/llm 取模型。全量注入 HTTP_PROXY 会把网关一起挡掉，
+// 症状是「开了出网管控之后每个 run 都报模型连不上」，而且很难联想到代理。
+// 只放行精确的本机网关地址，不放行整个 localhost 网段。
+func egressBypassFor(cfg Config, lg *log.Logger) string {
+	if v := os.Getenv("EGRESS_NO_PROXY"); v != "" {
+		return v
+	}
+	if cfg.LLMPublicURL == "" {
+		return ""
+	}
+	u, err := url.Parse(cfg.LLMPublicURL)
+	if err != nil || u.Host == "" {
+		lg.Printf("解析 LLMPublicURL %q 失败，出网例外未自动推导", cfg.LLMPublicURL)
+		return ""
+	}
+	h := u.Hostname()
+	if h == "127.0.0.1" || h == "localhost" || h == "::1" {
+		return u.Host
+	}
+	return ""
 }

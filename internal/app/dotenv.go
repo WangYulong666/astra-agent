@@ -7,8 +7,17 @@ package app
 // 语义刻意定得很窄：
 //   - 只补**未设置**的变量（shell 里 export 的优先，方便临时覆盖）
 //   - 不展开 ${VAR}（避免「看着像 shell 其实是字面量」的误解）
-//   - 成对引号会被去掉，其余原样保留（含 # 之后的内容）
+//   - 成对引号会被去掉，引号外的行尾「 # 注释」会被剥掉
 //   - 文件不存在是正常情况，不报错
+//
+// 为什么必须剥行尾注释：.env.example 里大量写成
+//
+//	MILVUS_ADDR=   # 127.0.0.1:19530；留空=关闭
+//
+// 用户照惯例 cp 一份就跑，如果不剥，MILVUS_ADDR 的值就是那串中文注释——
+// 能力被「启用」到一个根本不存在的地址上，而 /v1/meta 显示 on，
+// 排查时没人会想到是 .env 的注释。值里本身含 #（密码、URL fragment）
+// 要写成引号包住，引号内的 # 不处理。
 
 import (
 	"bufio"
@@ -43,9 +52,21 @@ func LoadDotEnv(path string, lg *log.Logger) int {
 			continue
 		}
 		v = strings.TrimSpace(v)
+		quoted := false
 		if len(v) >= 2 {
 			if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
 				v = v[1 : len(v)-1]
+				quoted = true
+			}
+		}
+		// 未加引号时，「空白 + #」后面的都是注释。要求有空白是为了不误伤
+		// 形如 key=abc#def 的值——那种 # 是内容，不是注释。
+		// TrimSpace 之后整行以 # 开头（KEY=   # 注释）也算纯注释，值是空串。
+		if !quoted {
+			if strings.HasPrefix(v, "#") {
+				v = ""
+			} else if i := strings.Index(v, " #"); i >= 0 {
+				v = strings.TrimSpace(v[:i])
 			}
 		}
 		if _, exists := os.LookupEnv(k); exists {
