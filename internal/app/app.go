@@ -115,6 +115,9 @@ type Server struct {
 	// 必须在关存储之前调用：它们可能还在写，先停再关。
 	stopTrace func()
 	stopMem   func()
+	// tracer 是观测出口本体；stopTrace 只停事件桥，不关 worker，
+	// 退出前还要单独调 tracer.Close()（顺序见 Close）。可能是 Disabled 的空实现。
+	tracer trace.Tracer
 
 	meta map[string]string
 
@@ -341,6 +344,7 @@ func New(cfg Config) (*Server, error) {
 	// 可选能力：配了就开、没配就关。任何一项起不来都只记日志，
 	// 不能让「没装 Milvus」变成「平台起不来」。
 	capa := openCapabilities(lg, st, mgr, cfg, egCtl, connMgr)
+	s.tracer = capa.Trace
 	coord := openCollab(lg, mgr, st, cfg)
 	ledger := openActivity(lg, st, egCtl, coord)
 	// 两个旁路都订阅 hub 的全局事件。Hub 已支持多消费者（追加语义），
@@ -450,7 +454,16 @@ func (s *Server) Close() error {
 	// 先停旁路：trace 要把缓冲刷出去、记忆要等在飞的写入落库，
 	// 都依赖存储还活着，所以顺序不能反。
 	if s.stopTrace != nil {
-		s.stopTrace()
+		s.stopTrace() // 停事件桥并 Flush 已入队事件
+	}
+	// tracer.Close 不能省：stopTrace 只停事件桥，不关 Langfuse 的 worker；
+	// 少了这一步 worker goroutine 会泄漏，队列/事件桥的丢弃计数也永远没人读。
+	// 必须在 stopTrace 之后（桥停了不会再往队列写）才能 drain 完最后一批，
+	// 又要在关存储之前，顺序不能反。Disabled().Close() 是无害的 no-op。
+	if s.tracer != nil {
+		if err := s.tracer.Close(); err != nil {
+			s.lg.Printf("关闭观测上报失败: %v", err)
+		}
 	}
 	if s.stopMem != nil {
 		s.stopMem()

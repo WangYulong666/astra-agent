@@ -217,8 +217,8 @@ func (m *Manager) CreateSession(ctx context.Context, opts CreateSessionOptions) 
 	}
 
 	// 第三方凭据：只注入该 租户+用户 自己已授权的连接器。
-	// proxy 模式目前还没接 token 替换，Inject 会返回未实现——连接器是增强项，
-	// 绝不能让它把会话创建挡下来，所以这里只记日志。
+	// proxy 模式已实现：注入的是 sidecar 基址而非 token，token 由 egress sidecar
+	// 转发时按用户取用注入；连接器是增强项，注入失败只记日志，不挡会话创建。
 	if m.cfg.Connectors != nil && m.cfg.Connectors.Enabled() {
 		if names := m.connectedNames(ctx, opts.TenantID, opts.UserID); len(names) > 0 {
 			env, err := m.cfg.Connectors.Inject(ctx, opts.TenantID, opts.UserID, names)
@@ -364,12 +364,25 @@ func (m *Manager) DeleteSession(ctx context.Context, id string) error {
 		b.mu.Unlock()
 	}
 
-	derr := m.cfg.Provider.Destroy(ctx, id)
+	// Destroy 可能撞上还没退完的 acp-proxy（并行测试/高并发删除时偶发），
+	// 有界重试几次。最终仍失败也**继续删数据**：第 3 步已经定了这个取舍——
+	// 让「会话删不掉」变成 500、留下一个标着 deleted 却仍可查到的半死会话，
+	// 比留一个待回收的沙箱更糟；沙箱由 lifecycle reaper 兜底回收。
+	// 实测症状：TestSessionLifecycle 在全量并行下偶发「删会话返回 500 /
+	// 删后查会话返回 200」。
+	var derr error
+	for i := 0; i < 8; i++ {
+		derr = m.cfg.Provider.Destroy(ctx, id)
+		if derr == nil || errors.Is(derr, sandbox.ErrNotFound) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	if m.cfg.Egress != nil {
 		m.cfg.Egress.Unregister(id)
 	}
 	if derr != nil && !errors.Is(derr, sandbox.ErrNotFound) {
-		return fmt.Errorf("销毁沙箱失败: %w", derr)
+		m.log.Printf("删除会话 %s 时销毁沙箱失败（继续删数据，沙箱交由 reaper 回收）: %v", id, derr)
 	}
 
 	// 5. 删数据。仍可能撞上还没来得及退出的写入方，重试几次。

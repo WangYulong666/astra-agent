@@ -96,6 +96,7 @@ admin-cli quota show|set --tenant
 admin-cli key list|rotate
 admin-cli sandbox list|kill
 admin-cli audit tail [--follow]
+admin-cli logs egress|history|activity|children|approvals|usage|billing
 admin-cli obs status|traces --run
 admin-cli memory stats [--tenant]       # 只读统计，不含内容
 ```

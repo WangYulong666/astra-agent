@@ -2,7 +2,7 @@
 #
 # 能验证什么：
 #   trace 写入 → Langfuse UI / GET /api/public/traces 能查到；
-#   internal/obs 的 Ingestion HTTP API 上报链路（POST /api/public/ingestion）。
+#   internal/trace/langfuse.go 的 Ingestion HTTP API 上报链路（POST /api/public/ingestion）。
 #
 # 不能验证什么：
 #   高可用、水平扩容、备份。这里是单机 compose，Langfuse 官方也明说这套「

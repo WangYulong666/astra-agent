@@ -420,7 +420,7 @@ docker compose -f deploy/observability/compose.yaml exec clickhouse \
 三个具体风险：
 
 1. **不要单独升 Langfuse。** v3 → v4 换了写入协议（批量 ingestion → OTel 风格），
-   `internal/obs` 的 HTTP 拼装会整体失效；同时 ClickHouse 门槛从 24.3 抬到 25.12。
+   `internal/trace/langfuse.go` 的 HTTP 拼装会整体失效；同时 ClickHouse 门槛从 24.3 抬到 25.12。
 2. **不要单独升 ClickHouse 到 25.x。** v3 的迁移脚本没在 25.x 上验证过；反过来
    把 Langfuse 升到 v4 又必须升 CH —— 这两件事必须一起做，且要先备份 CH 数据。
 3. **SeaweedFS 的所有权模型与 MinIO 不同。** 预签名 URL、`ListObjectsV2` 的分页

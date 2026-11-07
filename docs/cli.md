@@ -212,6 +212,35 @@ admin-cli memory stats [--tenant <id>]  # 只读统计，不含任何记忆内�
 `memory stats` 是**集合级**统计：服务端没有按租户拆分的接口，
 `--tenant` 只用于核对口径并在输出里说明这一点。
 
+### 日志查询（`logs`）
+
+后端把「能查历史」的端点散在七处，`logs` 分组把它们收在一起。与
+`audit tail` 的分工：audit 记的是「谁调了什么管理接口」，logs 记的是
+「一次执行 / 一次出网 / 一笔用量留下了什么」。
+
+```bash
+admin-cli logs egress [--limit 100] [--tenant <id>]     # 出网 allow/deny/审批记录
+admin-cli logs history <runID> [--after N]              # run 完整事件历史（非 SSE）
+admin-cli logs activity <runID> [--limit 200]           # 行动账本：做了什么、卡在哪
+admin-cli logs activity --session <sid> [--limit 200]   # 按会话聚合多个 run
+admin-cli logs children <runID>                        # 该 run 派生的子 agent
+admin-cli logs approvals <runID>                       # 待决/已决的人工审批
+admin-cli logs usage [--from T] [--to T] [--limit N] [--user <id>]
+admin-cli logs billing                                 # 本月账单
+```
+
+- 时间参数接受 RFC3339 或纯日期（按 UTC 当天 0 点）。
+- `logs activity` 的位置参数等价于 `--run`；`--run` 与 `--session` 二选一，
+  都不给会直接报用法错误（退出码 2），不会发出一个路径不完整的请求。
+- `logs usage` 走 `/v1/usage`（成员可查自己），`quota show` 走
+  `/v1/admin/usage`（治理视角），两者别混。
+- `logs egress` 需要 `audit:read`；能力未启用时服务端回 503，CLI 会原样显示。
+- 全局 flag 可以写在子命令前（`logs --json egress`），CLI 会把值型 flag
+  剥掉再识别子命令；其余位置随意。
+
+常用的组合：先 `logs activity <runID>` 看用户视角的时间线，觉得哪一步可疑
+再 `logs history <runID>` 翻原始事件，最后 `logs egress` 对照出网记录。
+
 ## 5. 脚本化
 
 ```bash
@@ -226,6 +255,10 @@ astra-cli memory search "部署" --k 5 --json | jq -r '.[] | "\(.score|tostring[
 
 # 审计落地
 admin-cli audit tail --limit 1000 --json > audit.json
+
+# 出网拒绝记录 + 某个 run 的完整事件流
+admin-cli logs egress --limit 500 --json > egress.json
+admin-cli logs history "$RUN" --json > events.json
 ```
 
 `--json` 输出的就是服务端原样结构，字段名不加壳、不改名——脚本依赖的

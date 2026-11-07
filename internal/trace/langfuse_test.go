@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -428,5 +429,71 @@ func TestLangfuseQueryTraces(t *testing.T) {
 	one, err := lf.QueryTraces(ctx, Filter{RunID: "run-q"})
 	if err != nil || len(one) != 1 || one[0].LatencyMS != 2000 {
 		t.Fatalf("按 runID 查询不符: %+v, err=%v", one, err)
+	}
+}
+
+// ── 8. Close 读取并打印两个丢弃计数 ─────────────────────────
+
+// syncBuffer 让注入的 traceLog 在 -race 下也能安全收集输出：
+// worker goroutine 也可能往 logger 写（重试失败），读发生在 Close 返回之后。
+type syncBuffer struct {
+	mu sync.Mutex
+	b  []byte
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	b.b = append(b.b, p...)
+	b.mu.Unlock()
+	return len(p), nil
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.b)
+}
+
+func TestLangfuseCloseReportsDroppedCounts(t *testing.T) {
+	cap := &capture{}
+	srv := httptest.NewServer(http.HandlerFunc(cap.handler))
+	defer srv.Close()
+
+	// 注入 logger 捕获 Close 的收尾汇总；函数返回前恢复，不影响其他测试。
+	orig := traceLog
+	buf := &syncBuffer{}
+	traceLog = log.New(buf, "", 0)
+	defer func() { traceLog = orig }()
+
+	lf := newTestLangfuse(t, srv, 1)
+
+	// 队列丢弃：把内存队列填到上限，再 enqueue 一条触发「丢最旧」。
+	lf.mu.Lock()
+	lf.queue = make([]ingestEvent, maxQueue)
+	lf.mu.Unlock()
+	lf.enqueue(ingestEvent{ID: "probe", Type: "trace-create", Timestamp: rfc3339(time.Now().UTC())})
+	// 清掉队列让 Close 的 drain 不必真发这 2000 条；dropped 独立累加，不受影响。
+	lf.mu.Lock()
+	wantDropped := lf.dropped
+	lf.queue = nil
+	lf.mu.Unlock()
+	if wantDropped == 0 {
+		t.Fatal("队列满后 enqueue 没有递增 dropped")
+	}
+
+	// 事件桥丢弃：Attach 回调在 events 通道满时 Add(1)。稳定复现「通道满」要
+	// 阻塞桥的消费者，这里直接置计数，专注验证 Close 会不会把它读出来。
+	const wantBridge = 3
+	lf.bridgeDropped.Add(wantBridge)
+
+	if err := lf.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, fmt.Sprintf("队列丢弃 %d 条", wantDropped)) {
+		t.Errorf("Close 没打印队列丢弃计数 %d，输出: %q", wantDropped, got)
+	}
+	if !strings.Contains(got, fmt.Sprintf("事件桥丢弃 %d 条", wantBridge)) {
+		t.Errorf("Close 没打印事件桥丢弃计数 %d，输出: %q", wantBridge, got)
 	}
 }

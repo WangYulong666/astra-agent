@@ -652,9 +652,11 @@ func (l *Langfuse) Close() error {
 	l.mu.Lock()
 	dropped := l.dropped
 	l.mu.Unlock()
-	if dropped > 0 {
-		traceLog.Printf("队列满丢弃了 %d 条事件（上限 %d）", dropped, maxQueue)
-	}
+	bridgeDropped := l.bridgeDropped.Load()
+	// dropped 是内存队列满「丢最旧」，bridgeDropped 是事件桥通道满丢事件。
+	// worker 已停、队列已 drain，正好在收尾处把两个计数一起读出来——
+	// bridgeDropped 过去只写不读，是死计数；不调 Close 就永远看不见它。
+	traceLog.Printf("观测上报结束：队列丢弃 %d 条，事件桥丢弃 %d 条（队列上限 %d）", dropped, bridgeDropped, maxQueue)
 	return nil
 }
 
@@ -749,9 +751,8 @@ func (l *Langfuse) Attach(hub *eventbus.Hub, src ...RunSource) (stop func()) {
 	// 这里只做「过滤 + 非阻塞投递」，任何 IO（回查 store、拼 JSON、发 HTTP）
 	// 都在 runBridge 里做。
 	//
-	// 已知限制：Hub 只保留一个全局回调（后注册覆盖先注册）。桌面端 main 里
-	// 那处 OnGlobal（审批系统通知）如果在本函数之后注册，会把事件桥顶掉。
-	// 服务端（cmd/astra-server）没有这个问题。
+	// Hub.OnGlobal 是追加语义，多个消费者互不顶掉：桌面端 main 里的
+	// OnGlobal（审批系统通知）与本事件桥各收各的，谁先注册都不影响对方。
 	hub.OnGlobal(func(ev store.Event) {
 		select {
 		case <-stopCh:

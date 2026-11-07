@@ -1582,6 +1582,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ObsTraceList'
+        "400":
+          description: "limit 不是正整数。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         "403":
           description: "需要 obs:read。"
           content:
