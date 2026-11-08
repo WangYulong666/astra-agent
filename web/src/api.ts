@@ -622,3 +622,86 @@ export const activityApi = {
     )
   },
 }
+
+// ── 自闭环：能力注册表 / 技能 / 失败诊断 ─────────────────────────
+//
+// 三个接口都由主控在 api.go 里装配。能力未启用时统一返回 503 + {"error":…}，
+// 前端一律以接口回的状态为准，不在这里做第二套能力探测。
+// 字段与后端 JSON 逐字对应（camelCase），不做映射层。
+
+export type CapabilityKind = 'api' | 'cli' | 'skill'
+
+/**
+ * GET /v1/capabilities 的条目。
+ * 第一层（默认）只回 name/kind/description/enabled/source；
+ * endpoint / authAction / requiredEnv / requires / unavailable 只在 ?detail=full 下发；
+ * body 只有 GET /v1/capabilities/{name} 单项（skill 的 SKILL.md 全文）才带。
+ */
+export type Capability = {
+  name: string
+  kind: CapabilityKind
+  description: string
+  enabled: boolean
+  source?: string
+  endpoint?: string
+  authAction?: string
+  requiredEnv?: string[]
+  requires?: string[]
+  unavailable?: string
+  body?: string
+}
+
+export type CapabilitiesResponse = { items: Capability[]; detail: boolean }
+
+/** GET /v1/skills 的条目。status=unavailable 时带 unavailable 与 requires。 */
+export type Skill = {
+  name: string
+  description: string
+  version?: string
+  requires?: string[]
+  source?: string
+  status: 'ready' | 'unavailable'
+  unavailable?: string
+  /** GET /v1/skills/{name} 单项才带：SKILL.md 全文。 */
+  body?: string
+  updatedAt?: string
+}
+
+export type SkillsResponse = { items: Skill[] }
+
+/** GET /v1/insights 的一条结构化诊断。 */
+export type Insight = {
+  runId: string
+  sessionId?: string
+  status: string
+  error?: string
+  lastTool?: string
+  suggestion?: string
+  toolCount?: number
+  blocked?: number
+  failed?: number
+  createdAt: string
+}
+
+export type InsightsResponse = { items: Insight[]; limit: number }
+
+export const capabilityApi = {
+  list: (full = false) =>
+    request<CapabilitiesResponse>(`/v1/capabilities${full ? '?detail=full' : ''}`),
+  get: (name: string) =>
+    request<Capability>(`/v1/capabilities/${encodeURIComponent(name)}`),
+}
+
+export const skillApi = {
+  list: () => request<SkillsResponse>('/v1/skills'),
+  get: (name: string) => request<Skill>(`/v1/skills/${encodeURIComponent(name)}`),
+}
+
+export const insightApi = {
+  list: (params: { sessionId?: string; limit?: number } = {}) => {
+    const q = new URLSearchParams()
+    q.set('limit', String(params.limit ?? 20))
+    if (params.sessionId) q.set('session_id', params.sessionId)
+    return request<InsightsResponse>(`/v1/insights?${q.toString()}`)
+  },
+}

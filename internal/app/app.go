@@ -26,6 +26,7 @@ import (
 
 	"github.com/WangYulong666/astra-agent/internal/api"
 	"github.com/WangYulong666/astra-agent/internal/auth"
+	"github.com/WangYulong666/astra-agent/internal/distill"
 	"github.com/WangYulong666/astra-agent/internal/egress"
 	"github.com/WangYulong666/astra-agent/internal/eventbus"
 	"github.com/WangYulong666/astra-agent/internal/lifecycle"
@@ -116,6 +117,8 @@ type Server struct {
 	stopTrace   func()
 	stopMem     func()
 	stopInsight func()
+	// 自动沉淀订阅（run 终态 → skill 草稿），关停时要等在飞任务退出。
+	stopAutoDistill func()
 	// 装配后期才确定的运行时信息，runner 持同一指针。
 	hints *runner.RuntimeHints
 	// tracer 是观测出口本体；stopTrace 只停事件桥，不关 worker，
@@ -362,6 +365,9 @@ func New(cfg Config) (*Server, error) {
 	// 不能让「没装 Milvus」变成「平台起不来」。
 	capa := openCapabilities(lg, st, mgr, cfg, egCtl, connMgr)
 	s.tracer = capa.Trace
+	// 自动沉淀：run 终态且成功工具调用 ≥2 时自动生成草稿，人仍保留 accept 权。
+	// 必须在 Hub 建好、Distiller 装好之后挂；distill 未启用时 Attach 自身 noop。
+	s.stopAutoDistill = distill.Attach(s.hub, capa.Distiller, st, lg)
 	coord := openCollab(lg, mgr, st, cfg)
 	ledger := openActivity(lg, st, egCtl, coord)
 	// 两个旁路都订阅 hub 的全局事件。Hub 已支持多消费者（追加语义），
@@ -510,6 +516,9 @@ func (s *Server) Close() error {
 	// 诊断订阅要在关存储前停：它可能还在写 insights.json。
 	if s.stopInsight != nil {
 		s.stopInsight()
+	}
+	if s.stopAutoDistill != nil {
+		s.stopAutoDistill()
 	}
 	return s.st.Close()
 }

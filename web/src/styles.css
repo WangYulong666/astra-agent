@@ -4295,3 +4295,152 @@ kbd {
   .ledger-row { padding: 0 12px; gap: 10px; }
   .ledger-filter .ledger-input { flex-basis: 100%; max-width: none; }
 }
+
+/* ══════════════════════════════════════════════════════════════
+   自闭环闭环页（能力注册表 / 能力包 / 失败诊断）—— 只追加，统一 .loop- 前缀。
+   颜色一律沿用现有 CSS 变量（--panel / --text / --border / 语义色 …），
+   不硬编码任何深色底：主题变量被改成浅色（浅背景 + 深文字）时这些面板自动跟随。
+   结构复用 .card / .tbl / .notice / .stat / .settings-kv 等既有类。
+   ══════════════════════════════════════════════════════════════ */
+
+.loop-counts {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+.loop-c-api .stat-v   { color: var(--accent); }
+.loop-c-cli .stat-v   { color: var(--accent-2); }
+.loop-c-skill .stat-v { color: var(--text); }
+.loop-c-on .stat-v    { color: var(--green); }
+.loop-c-off .stat-v   { color: var(--amber); }
+
+/* 状态徽标：沿用语义色变量，不写死色值 */
+.loop-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-family: var(--mono);
+  white-space: nowrap;
+  border: 1px solid var(--border-2);
+  background: var(--panel-2);
+  color: var(--text-2);
+}
+.loop-tag-ready, .loop-tag-ok { color: var(--green); background: var(--green-soft); }
+.loop-tag-warn                { color: var(--amber); background: var(--amber-soft); }
+.loop-tag-failed              { color: var(--red);   background: var(--red-soft); }
+.loop-tag-dim                 { color: var(--muted); }
+
+/* 筛选 / 工具条 */
+.loop-filters { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.loop-filters .input { flex: 1 1 180px; min-width: 0; max-width: 320px; }
+
+/* 表格：详情列多，始终允许容器横向滚动；页面本身不溢出 */
+.loop-table { overflow-x: auto; overflow-y: hidden; min-width: 0; -webkit-overflow-scrolling: touch; }
+.loop-cell-cut {
+  display: block;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.loop-cell-mono { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); }
+.loop-list { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+
+/* 能力包条目 */
+.loop-skill-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  cursor: pointer;
+  border-radius: var(--radius, 8px);
+}
+.loop-skill-head:hover .skill-name { color: var(--accent); }
+.loop-caret { color: var(--muted); font-size: 11px; flex: none; width: 12px; }
+
+.loop-reason {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--amber);
+  background: var(--amber-soft);
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  padding: 7px 10px;
+  line-height: 1.6;
+}
+.loop-req { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* 展开区 / 侧栏：SKILL.md 全文与第三层披露 */
+.loop-panel {
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius, 10px);
+  background: var(--panel-2);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.loop-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+  min-width: 0;
+}
+.loop-panel-name {
+  font-family: var(--mono);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.loop-body {
+  margin: 0;
+  padding: 12px 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-2);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  max-height: 420px;
+  overflow: auto;
+  min-width: 0;
+}
+
+/* 顶部回灌说明（挂在 .notice.info 上，颜色由它决定） */
+.loop-note code {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+}
+.loop-guide .settings-kv-key { color: var(--accent); }
+
+/* ── 响应式：计数降列、截断收窄、输入占整行，表格始终只内部滚动 ── */
+@media (max-width: 1023px) {
+  .loop-counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .loop-cell-cut { max-width: 200px; }
+}
+@media (max-width: 767px) {
+  .loop-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .loop-cell-cut { max-width: 160px; }
+  .loop-filters .input { flex-basis: 100%; max-width: none; }
+  .loop-panel { padding: 10px; }
+}
+

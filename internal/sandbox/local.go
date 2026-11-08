@@ -75,6 +75,13 @@ type meta struct {
 	// spawn(s.m, AgentSpec{Command: s.m.Agent}) 重启，不带 Env/新字段，
 	// 只放内存会在 pause→resume 后静默失效，等于安全边界自己消失。
 	NetworkPolicy *NetworkPolicy `json:"network_policy,omitempty"`
+	// CLIBin 沙箱内 astra-cli 的绝对路径。必须落盘，理由同 NetworkPolicy：
+	// Resume 用 spawn(s.m, AgentSpec{Command: s.m.Agent}) 重启、完全不带 Env，
+	// 幂等重建（ensureClient 里传的是 m.cfg.Agent，不是带 Hints 的那份 spec）
+	// 也可能不带 Env。只放内存会让 childEnv 的前置 PATH 注入在 resume / 重连后
+	// 静默消失，沙箱里的 `astra-cli` 就又解析不到了。沿用落盘旧值是 fail-closed：
+	// 漏传新值的请求不会把已注入的 CLI 路径抹掉。
+	CLIBin string `json:"cli_bin,omitempty"`
 }
 
 // 只允许这些字符做 ID。这不是洁癖：ID 直接拼进文件路径，
@@ -188,6 +195,11 @@ func (l *Local) Create(ctx context.Context, req CreateRequest) (Sandbox, error) 
 		if req.Agent.NetworkPolicy != nil {
 			old.NetworkPolicy = req.Agent.NetworkPolicy
 		}
+		// CLI bin 同理：只在显式给了新值时更新，否则沿用落盘旧值。Resume /
+		// ensureClient 的幂等重建不带 Env，靠这条保住 astra-cli 的 PATH 注入。
+		if nb := req.Agent.Env["ASTRA_CLI_BIN"]; nb != "" {
+			old.CLIBin = nb
+		}
 		old.State = StateRunning
 
 		// 重启用合并后的 spec：调用方没传 agent 命令时沿用 meta 里记的，
@@ -251,6 +263,8 @@ func (l *Local) Create(ctx context.Context, req CreateRequest) (Sandbox, error) 
 		Strict:    l.strictFor(spec),
 		// 出网强制边界随 meta 一起落盘，Resume 才能沿用（见 meta 字段注释）。
 		NetworkPolicy: spec.NetworkPolicy,
+		// 同理落盘 CLI bin：Resume 不带 Env，childEnv 从这里取回绝对路径。
+		CLIBin: spec.Env["ASTRA_CLI_BIN"],
 	}
 
 	cmd, err := l.spawn(m, spec)
@@ -363,6 +377,16 @@ func (l *Local) spawnCommand(m *meta, proxy string, proxyArgs []string) (string,
 
 // childEnv 构造 agent 的环境。核心是把 HOME 搬进沙箱目录：
 // 这样 node/npm 的缓存、dsh 的配置与凭据全部落在沙箱内，互不污染。
+//
+// 另外把 ASTRA_CLI_BIN 所在目录前置到 PATH，让沙箱里的 `astra-cli ...` 真能解析到
+// （设计文档 §2.2）：
+//   - bin 由主控通过 AgentSpec.Env 注入，ASTRA_CLI_BIN 变量本身也保留在 env 里；
+//   - Resume / 幂等重建不带 Env，退回 meta.CLIBin（见 meta 字段注释）；
+//   - bin 不存在或没执行位时只记一句日志、不注入 PATH，**绝不让 spawn 失败**——
+//     CLI 不可用应由 skillhub 标 unavailable，不是让整个沙箱起不来。
+//
+// 没有 CLI bin 时（含 Enabled=false / NetworkPolicy=nil 的全部既有场景），
+// 这段逻辑整体不触发，返回的 env 与改动前逐字节一致。
 func (l *Local) childEnv(m *meta, agent AgentSpec) []string {
 	env := os.Environ()
 	env = append(env,
@@ -372,10 +396,66 @@ func (l *Local) childEnv(m *meta, agent AgentSpec) []string {
 		"ASTRA_SANDBOX_ID="+m.ID,
 	)
 	_ = os.MkdirAll(filepath.Join(l.dir(m.ID), "tmp"), 0o755)
+
+	// 决定本次用哪个 bin：优先主控注入的 Env 值，否则用落盘的 meta.CLIBin。
+	bin := agent.Env["ASTRA_CLI_BIN"]
+	if bin == "" {
+		bin = m.CLIBin
+	}
+
 	for k, v := range agent.Env {
+		if k == "ASTRA_CLI_BIN" {
+			continue // 归一成下面一条，避免重复 Create / Resume 留下重复键
+		}
 		env = append(env, k+"="+v)
 	}
-	return env
+	if bin == "" {
+		return env
+	}
+	// 无论 Env 里原本有没有，都保证 ASTRA_CLI_BIN 恰好出现一次：Resume 时
+	// agent.Env 为空，这一步把主控注入过的变量补回来，skillhub 才读得到。
+	env = append(env, "ASTRA_CLI_BIN="+bin)
+
+	if !cliBinExecutable(bin) {
+		log.Printf("sandbox: ASTRA_CLI_BIN %q 不存在或不可执行，跳过 PATH 注入（CLI 由 skillhub 标 unavailable，不影响沙箱启动）", bin)
+		return env
+	}
+	return prependPath(env, filepath.Dir(bin))
+}
+
+// cliBinExecutable 判断 bin 是否是可直接执行的文件，只用于决定要不要注入 PATH。
+// 结果刻意保守：拿不准就当不可用（记日志、不注入），但绝不会让 spawn 失败。
+func cliBinExecutable(bin string) bool {
+	fi, err := os.Stat(bin)
+	if err != nil || fi.IsDir() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return true // Windows 没有 Unix 执行位，能 stat 到普通文件即可
+	}
+	return fi.Mode().Perm()&0o111 != 0
+}
+
+// prependPath 把 dir 前置到 env 里的 PATH，保留原 PATH（用 os.PathListSeparator 拼）。
+// env 里可能有多条 PATH（os.Environ 一条 + agent.Env 覆盖一条），归并成一条：
+// 取最后一条的值作原 PATH，前面拼 dir，避免 exec 收到重复键。
+func prependPath(env []string, dir string) []string {
+	orig := ""
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		i := strings.IndexByte(kv, '=')
+		if i >= 0 {
+			key := kv[:i]
+			// Unix 的 env 键大小写敏感，只认精确的 "PATH"，别误伤同名的 "path"；
+			// Windows 的 env 键大小写不敏感，需要宽松匹配。
+			if key == "PATH" || (runtime.GOOS == "windows" && strings.EqualFold(key, "PATH")) {
+				orig = kv[i+1:]
+				continue
+			}
+		}
+		out = append(out, kv)
+	}
+	return append(out, "PATH="+dir+string(os.PathListSeparator)+orig)
 }
 
 // profile 生成 sandbox-exec 的 Seatbelt 策略。

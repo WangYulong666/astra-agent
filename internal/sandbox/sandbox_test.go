@@ -117,6 +117,21 @@ func TestLocalLifecycle(t *testing.T) {
 	if testing.Short() {
 		t.Skip("集成测试，-short 下跳过")
 	}
+	// 这条用例验的是生命周期（端口保持 / 目录布局 / Destroy），与 Seatbelt
+	// 强制边界无关（后者由 TestSeatbelt* 单独覆盖）。若 go test 进程本身已被
+	// 沙箱化（macOS 沙箱不能嵌套），sandbox-exec 给 acp-proxy apply profile
+	// 会返回 sandbox_apply: Operation not permitted，代理起不来、health 永远
+	// refused——那是环境限制，不是本用例要测的东西。只在探测到「确实 apply
+	// 不了」时才用平台自带的降级开关绕开；普通主机上严格模式照常开启，
+	// 不改动任何被测断言。
+	if runtime.GOOS == "darwin" {
+		if _, err := os.Stat("/usr/bin/sandbox-exec"); err == nil {
+			probe, _ := exec.Command("/usr/bin/sandbox-exec", "-p", "(version 1)(deny network*)", "/usr/bin/true").CombinedOutput()
+			if strings.Contains(string(probe), "sandbox_apply") {
+				t.Setenv("ASTRA_NO_SEATBELT", "1")
+			}
+		}
+	}
 	proxy := buildProxy(t)
 	root := t.TempDir()
 	l := NewLocal(Options{Root: root, ProxyBin: proxy})

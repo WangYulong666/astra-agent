@@ -17,8 +17,10 @@ export const ROUTES = [
   '/admin/observability',
   '/admin/memory',
   '/admin/skills',
-  // 用户视角行动账本
+  // 用户视角行动账本；自闭环两个面板排在它附近
   '/admin/activity',
+  '/admin/capabilities',
+  '/admin/insights',
   '/admin/tenants',
   '/admin/settings',
 ] as const

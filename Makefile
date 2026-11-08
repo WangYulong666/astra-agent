@@ -320,3 +320,27 @@ deps-status: ## 逐个探测依赖的端口/健康端点，输出「谁没起来
 	  printf '排障顺序见 deploy/README.md：先基础依赖（etcd/S3 → milvus / clickhouse）再应用层。\n'; \
 	fi; \
 	exit 0
+
+# 自闭环前提自检：外部依赖全绿不代表 agent 真能干活。
+# Milvus/Langfuse 都起来，但沙箱里没 astra-cli、skills 目录不可读、
+# 控制面能力注册表没开，闭环一样是断的——以前没人检查这三件事。
+.PHONY: loop-check
+loop-check: ## 检查自闭环前提（CLI 可执行 / skills 可读 / 能力接口可达）
+	@printf '%-20s ' 'SKILL_DIR'; \
+	dir="$${SKILL_DIR:-$$HOME/.astra/skills}"; \
+	if [ -d "$$dir" ] && [ -r "$$dir" ]; then printf '\033[32mOK\033[0m  %s\n' "$$dir"; \
+	else printf '\033[33m未就绪\033[0m  建目录并跑一次服务让它同步内置 skill：mkdir -p %s\n' "$$dir"; fi; \
+	printf '%-20s ' 'astra-cli'; \
+	bin="$${ASTRA_CLI_BIN:-$$(command -v astra-cli || true)}"; \
+	if [ -n "$$bin" ] && [ -x "$$bin" ]; then printf '\033[32mOK\033[0m  %s\n' "$$bin"; \
+	else printf '\033[33m未就绪\033[0m  make build 后把 astra-cli 放进 PATH，或设 ASTRA_CLI_BIN\n'; fi; \
+	printf '%-20s ' '/v1/capabilities'; \
+	srv="$${ASTRA_SERVER:-http://127.0.0.1:7788}"; \
+	code=$$(curl -s -m 3 -o /dev/null -w '%{http_code}' "$$srv/v1/capabilities" 2>/dev/null || echo 000); \
+	if [ "$$code" = "200" ]; then printf '\033[32mOK\033[0m\n'; \
+	else printf '\033[33mHTTP %s\033[0m  控制面未起或能力注册表未启用（看 /v1/meta 的 capabilities）\n' "$$code"; fi; \
+	printf '%-20s ' '/v1/skills'; \
+	code=$$(curl -s -m 3 -o /dev/null -w '%{http_code}' "$$srv/v1/skills" 2>/dev/null || echo 000); \
+	if [ "$$code" = "200" ]; then printf '\033[32mOK\033[0m\n'; \
+	else printf '\033[33mHTTP %s\033[0m  技能注册表未启用（SKILL_DIR 不可写？）\n' "$$code"; fi; \
+	exit 0

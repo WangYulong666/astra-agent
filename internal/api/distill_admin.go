@@ -81,6 +81,11 @@ func (h *handler) acceptSkillDraft(w http.ResponseWriter, r *http.Request) {
 		h.distillFail(w, err)
 		return
 	}
+	// 立刻刷新技能索引：skillhub.List 本身也会懒刷新，但 accept 的当次请求
+	// 就该看到新技能，不该等下一次查询。
+	if h.cfg.SkillHub != nil {
+		_ = h.cfg.SkillHub.Refresh(r.Context())
+	}
 	h.audit(r, "skill.accept", "draft", r.PathValue("id"), map[string]any{"path": path})
 	writeJSON(w, http.StatusOK, map[string]string{"path": path})
 }

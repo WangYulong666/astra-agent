@@ -48,7 +48,7 @@
 | 来源 | 内容 | 怎么拿 |
 |---|---|---|
 | `openapi.yaml` | 全部 API 路由 + operationId + 权限 | `api.SpecRoutes()`（主控在 api 包导出，复用现有 `parseYAMLSubset`） |
-| CLI 命令表 | `astra-cli` / `admin-cli` 全部子命令 | `internal/client/clikit` 新增 `CommandSpec` 结构化清单，两个 CLI 的 main 都从它生成 help（消灭硬编码文本） |
+| CLI 命令表 | `astra-cli` / `admin-cli` 全部子命令 | `internal/client/clikit` 新增 `CommandSpec` 结构化清单（50 条）。`TestCLIRegistryCoversCommands` 用源码正则抓所有 `case "..."`，新增命令忘了登记就红；help 文本暂保留原样，由这道闸门保证不漂移 |
 | skills 目录 | 静态 skill + distill 产出的动态 skill | `internal/skillhub` 扫描 `SKILL_DIR` 与仓库 `skills/` |
 | `/v1/meta` | 能力开关 on/off | app 装配时注入 |
 
