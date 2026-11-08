@@ -113,8 +113,11 @@ type Server struct {
 	auth   *auth.Service
 	// 全局事件旁路的停止函数（trace 上报、记忆入库）。
 	// 必须在关存储之前调用：它们可能还在写，先停再关。
-	stopTrace func()
-	stopMem   func()
+	stopTrace   func()
+	stopMem     func()
+	stopInsight func()
+	// 装配后期才确定的运行时信息，runner 持同一指针。
+	hints *runner.RuntimeHints
 	// tracer 是观测出口本体；stopTrace 只停事件桥，不关 worker，
 	// 退出前还要单独调 tracer.Close()（顺序见 Close）。可能是 Disabled 的空实现。
 	tracer trace.Tracer
@@ -253,18 +256,32 @@ func New(cfg Config) (*Server, error) {
 			"若 agent 通过本地网关取模型，请设 EGRESS_NO_PROXY=127.0.0.1:<port>")
 	}
 
+	// 沙箱凭据签发器用接口断言：*auth.Service 由 T4 加上 IssueSandboxKey，
+	// 没加之前自动降级为 nil（兼容模式），骨架也能编译。
+	var sandboxIssuer runner.SandboxKeyIssuer
+	if s.auth != nil {
+		if v, ok := any(s.auth).(runner.SandboxKeyIssuer); ok {
+			sandboxIssuer = v
+		}
+	}
+	hints := runner.NewRuntimeHints()
+	s.hints = hints
+
 	mgr, err := runner.New(runner.Config{
-		Store:        st,
-		Provider:     prov,
-		Hub:          s.hub,
-		Agent:        spec,
-		Policy:       runner.PolicyByName(cfg.Policy),
-		Logger:       lg,
-		Creds:        creds,
-		Egress:       egCtl,
-		Connectors:   connMgr,
-		EgressBypass: egBypass,
-		NetworkLock:  networkLockEnabled(lg, egCtl),
+		Store:            st,
+		Provider:         prov,
+		Hub:              s.hub,
+		Agent:            spec,
+		Policy:           runner.PolicyByName(cfg.Policy),
+		Logger:           lg,
+		Creds:            creds,
+		Egress:           egCtl,
+		Connectors:       connMgr,
+		EgressBypass:     egBypass,
+		NetworkLock:      networkLockEnabled(lg, egCtl),
+		Hints:            hints,
+		SandboxKeyIssuer: sandboxIssuer,
+		InsightReplay:    envBool("INSIGHT_REPLAY", true),
 	})
 	if err != nil {
 		st.Close()
@@ -369,6 +386,22 @@ func New(cfg Config) (*Server, error) {
 		"collab":     boolLabel(coord != nil),
 		"activity":   boolLabel(ledger != nil),
 	}
+	// ── 自闭环装配：能力注册表 / 技能注册表 / 失败诊断 ──
+	// 放在 info 之后，因为 switches 直接复用同一份能力开关，避免两处漂移。
+	switches := make(map[string]bool, len(info))
+	for k, v := range info {
+		switches[k] = v == "on"
+	}
+	cliBin := resolveCLIBin(cfg, lg)
+	skillHub := openSkillHub(lg, cfg, s.hub, switches, cliBin)
+	caps := openCapabilityRegistry(lg, skillHub, switches)
+	insights, stopInsight := openInsights(lg, st, ledger, s.hub, cfg)
+	s.stopInsight = stopInsight
+	hints.Set(insights, "http://"+cfg.Addr, cliBin)
+	info["capabilities"] = boolLabel(caps != nil)
+	info["skills"] = boolLabel(skillHub != nil)
+	info["insights"] = boolLabel(insights != nil)
+
 	h, err := api.Handler(api.Config{
 		Manager: mgr, Store: st, Hub: s.hub, Provider: prov, Logger: lg,
 		Auth: authenticator, Admin: adminStore, Auditor: auditor,
@@ -384,6 +417,7 @@ func New(cfg Config) (*Server, error) {
 		Egress:         capa.Egress, Schedules: capa.Schedules, Scheduler: capa.Scheduler,
 		Distiller: capa.Distiller, Connectors: capa.Connectors, Browsers: capa.Browsers,
 		Collab: coord, Ledger: ledger,
+		Capabilities: caps, SkillHub: skillHub, Insights: insights,
 	})
 	if err != nil {
 		st.Close()
@@ -409,6 +443,11 @@ func (s *Server) Start() (string, error) {
 		return "", err
 	}
 	s.ln = ln
+	// cfg.Addr 可能是 :0（内核分配端口），到 Start 才知道真实地址。
+	// 沙箱里的 ASTRA_SERVER 必须用这个，否则 astra-cli 连不上。
+	if s.hints != nil {
+		s.hints.SetURL("http://" + ln.Addr().String())
+	}
 	go func() {
 		if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.errCh <- err
@@ -467,6 +506,10 @@ func (s *Server) Close() error {
 	}
 	if s.stopMem != nil {
 		s.stopMem()
+	}
+	// 诊断订阅要在关存储前停：它可能还在写 insights.json。
+	if s.stopInsight != nil {
+		s.stopInsight()
 	}
 	return s.st.Close()
 }

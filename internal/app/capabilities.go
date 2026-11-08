@@ -13,17 +13,24 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/WangYulong666/astra-agent/internal/activity"
+	"github.com/WangYulong666/astra-agent/internal/api"
 	"github.com/WangYulong666/astra-agent/internal/browser"
+	"github.com/WangYulong666/astra-agent/internal/capability"
+	"github.com/WangYulong666/astra-agent/internal/client/clikit"
 	"github.com/WangYulong666/astra-agent/internal/collab"
 	"github.com/WangYulong666/astra-agent/internal/connector"
 	"github.com/WangYulong666/astra-agent/internal/distill"
 	"github.com/WangYulong666/astra-agent/internal/egress"
+	"github.com/WangYulong666/astra-agent/internal/eventbus"
+	"github.com/WangYulong666/astra-agent/internal/insight"
 	"github.com/WangYulong666/astra-agent/internal/memory"
 	"github.com/WangYulong666/astra-agent/internal/runner"
 	"github.com/WangYulong666/astra-agent/internal/schedule"
+	"github.com/WangYulong666/astra-agent/internal/skillhub"
 	"github.com/WangYulong666/astra-agent/internal/store"
 	"github.com/WangYulong666/astra-agent/internal/trace"
 )
@@ -303,4 +310,180 @@ func openActivity(lg *log.Logger, st store.Store, egCtl egress.Controller,
 	}
 	lg.Printf("行动账本已启用")
 	return l
+}
+
+// ── 自闭环装配 ────────────────────────────────────────────────
+
+// capabilitySources 把四类事实汇总成能力注册表的输入。
+// 放在 app 层是为了避免 capability 反向 import api / skillhub / clikit
+// （那会形成装配环），也便于单点替换来源。
+type capabilitySources struct {
+	skills   skillhub.Hub
+	switches map[string]bool
+}
+
+func (c capabilitySources) Collect(ctx context.Context) ([]capability.Spec, error) {
+	var out []capability.Spec
+
+	routes, err := api.SpecRoutes()
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range routes {
+		env := requiredEnvForTag(r.Tag, r.Path)
+		enabled := true
+		for _, e := range env {
+			if os.Getenv(e) == "" && !c.switches[envToSwitch[e]] {
+				enabled = false
+			}
+		}
+		out = append(out, capability.Spec{
+			Name: r.OperationID, Kind: "api", Description: r.Summary,
+			Endpoint: r.Method + " " + r.Path, Source: "openapi",
+			RequiredEnv: env, Enabled: enabled,
+		})
+	}
+
+	for _, cmd := range clikit.KnownCommands() {
+		var env []string
+		enabled := true
+		for _, req := range cmd.Requires {
+			env = append(env, switchToEnv[req]...)
+			if c.switches[req] == false && len(switchToEnv[req]) > 0 {
+				enabled = false
+			}
+		}
+		out = append(out, capability.Spec{
+			Name: cmd.CLI + " " + cmd.Name, Kind: "cli", Description: cmd.Description,
+			Endpoint: cmd.Usage, Source: cmd.CLI,
+			RequiredEnv: env, Requires: cmd.Requires, Enabled: enabled,
+		})
+	}
+
+	if c.skills != nil {
+		items, err := c.skills.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, sk := range items {
+			out = append(out, capability.Spec{
+				Name: sk.Name, Kind: "skill", Description: sk.Description,
+				Source: sk.Source, Requires: sk.Requires,
+				Enabled: sk.Status == "ready", Body: sk.Body,
+			})
+		}
+	}
+	return out, nil
+}
+
+// 能力 → 环境变量的静态映射。刻意只列「缺了就必然不可用」的必填项，
+// 可选调优项（采样率、超时、上限）不进这里，否则 enabled 会一直误报 off。
+var switchToEnv = map[string][]string{
+	"memory":     {"MILVUS_ADDR"},
+	"trace":      {"LANGFUSE_HOST", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"},
+	"egress":     {"EGRESS_LISTEN_ADDR"},
+	"connectors": {"ASTRA_VAULT_KEY"},
+	"scheduler":  {},
+	"distill":    {},
+	"browser":    {},
+	"collab":     {},
+	"activity":   {},
+}
+
+var envToSwitch = map[string]string{
+	"MILVUS_ADDR": "memory", "LANGFUSE_HOST": "trace",
+	"LANGFUSE_PUBLIC_KEY": "trace", "LANGFUSE_SECRET_KEY": "trace",
+	"EGRESS_LISTEN_ADDR": "egress", "ASTRA_VAULT_KEY": "connectors",
+}
+
+func requiredEnvForTag(tag, path string) []string {
+	switch tag {
+	case "Memory":
+		return switchToEnv["memory"]
+	case "Observability":
+		return switchToEnv["trace"]
+	case "Egress":
+		return switchToEnv["egress"]
+	case "Connectors":
+		return switchToEnv["connectors"]
+	}
+	// 少数散落在别的 tag 下但依赖可选能力的端点，按路径兜一层。
+	switch {
+	case strings.HasPrefix(path, "/v1/admin/egress/"):
+		return switchToEnv["egress"]
+	case strings.HasPrefix(path, "/v1/memory/"):
+		return switchToEnv["memory"]
+	}
+	return nil
+}
+
+func resolveCLIBin(cfg Config, lg *log.Logger) string {
+	if v := os.Getenv("ASTRA_CLI_BIN"); v != "" {
+		return v
+	}
+	cands := []string{filepath.Join(cfg.DataDir, "bin", "astra-cli")}
+	if exe, err := os.Executable(); err == nil {
+		cands = append(cands, filepath.Join(filepath.Dir(exe), "astra-cli"))
+	}
+	for _, p := range cands {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+			return p
+		}
+	}
+	lg.Printf("⚠ 未找到 astra-cli 二进制：skill 的 requires 会标记为 unavailable")
+	return ""
+}
+
+func openSkillHub(lg *log.Logger, cfg Config, hub *eventbus.Hub,
+	switches map[string]bool, cliBin string) skillhub.Hub {
+	dir := envOr("SKILL_DIR", filepath.Join(homeDir(), ".astra", "skills"))
+	m, err := skillhub.Open(skillhub.Config{
+		SkillDir: dir, CLIBin: cliBin, Switches: switches,
+	}, hub)
+	if err != nil {
+		lg.Printf("技能注册表未启用: %v", err)
+		return nil
+	}
+	lg.Printf("技能注册表已启用（目录 %s）", dir)
+	return m
+}
+
+func openCapabilityRegistry(lg *log.Logger, skills skillhub.Hub,
+	switches map[string]bool) capability.Registry {
+	r, err := capability.Open(capabilitySources{skills: skills, switches: switches})
+	if err != nil {
+		lg.Printf("能力注册表未启用: %v", err)
+		return nil
+	}
+	lg.Printf("能力注册表已启用")
+	return r
+}
+
+type insightActivity struct{ ledger activity.Ledger }
+
+func (a insightActivity) Summary(ctx context.Context, runID string) (insight.Summary, error) {
+	if a.ledger == nil {
+		return insight.Summary{}, nil
+	}
+	sm, err := a.ledger.Summary(ctx, runID)
+	if err != nil {
+		return insight.Summary{}, err
+	}
+	return insight.Summary{
+		Done: sm.Done, Running: sm.Running, Blocked: sm.Blocked,
+		Failed: sm.Failed, Current: sm.Current,
+	}, nil
+}
+
+func openInsights(lg *log.Logger, st store.Store, ledger activity.Ledger,
+	hub *eventbus.Hub, cfg Config) (insight.Store, func()) {
+	dir := filepath.Join(cfg.DataDir, "insights")
+	s, err := insight.Open(dir)
+	if err != nil {
+		lg.Printf("失败诊断未启用: %v", err)
+		return nil, func() {}
+	}
+	stop := insight.Attach(hub, st, insightActivity{ledger: ledger}, dir, lg)
+	lg.Printf("失败诊断已启用（数据 %s）", dir)
+	return s, stop
 }

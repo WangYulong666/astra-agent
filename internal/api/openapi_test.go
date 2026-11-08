@@ -151,6 +151,13 @@ var codeRoutes = []string{
 	"GET /v1/runs/{id}/activity",
 	"GET /v1/sessions/{id}/activity",
 
+	// 自闭环：能力发现 / 技能注册 / 失败诊断
+	"GET /v1/capabilities",
+	"GET /v1/capabilities/{name}",
+	"GET /v1/skills",
+	"GET /v1/skills/{name}",
+	"GET /v1/insights",
+
 	// 浏览器：每会话一个隔离的 headless Chrome 实例
 	"POST /v1/sessions/{id}/browser",
 	"GET /v1/sessions/{id}/browser",
@@ -677,6 +684,10 @@ func probeURL(p, method, sessID, doomedID, runID string) (string, bool) {
 		return "/v1/hooks/probe-token", true
 	case strings.HasPrefix(p, "/v1/connectors/"):
 		return strings.ReplaceAll(p, "{name}", "github"), true
+	// 能力/技能单项查询的 {name}：能力未启用时 handler 回 503，启用时回 404，
+	// 两种都算「路由存在」。
+	case strings.HasPrefix(p, "/v1/capabilities/"), p == "/v1/skills/{name}":
+		return strings.ReplaceAll(p, "{name}", probeDummyID), true
 	}
 	// 不含参数的路径；含 { 说明有未处理的模板。
 	return p, !strings.Contains(p, "{")

@@ -21,16 +21,19 @@ import (
 	"github.com/WangYulong666/astra-agent/internal/activity"
 	"github.com/WangYulong666/astra-agent/internal/auth"
 	"github.com/WangYulong666/astra-agent/internal/browser"
+	"github.com/WangYulong666/astra-agent/internal/capability"
 	"github.com/WangYulong666/astra-agent/internal/collab"
 	"github.com/WangYulong666/astra-agent/internal/connector"
 	"github.com/WangYulong666/astra-agent/internal/distill"
 	"github.com/WangYulong666/astra-agent/internal/egress"
 	"github.com/WangYulong666/astra-agent/internal/eventbus"
+	"github.com/WangYulong666/astra-agent/internal/insight"
 	"github.com/WangYulong666/astra-agent/internal/lifecycle"
 	"github.com/WangYulong666/astra-agent/internal/memory"
 	"github.com/WangYulong666/astra-agent/internal/runner"
 	"github.com/WangYulong666/astra-agent/internal/sandbox"
 	"github.com/WangYulong666/astra-agent/internal/schedule"
+	"github.com/WangYulong666/astra-agent/internal/skillhub"
 	"github.com/WangYulong666/astra-agent/internal/store"
 	"github.com/WangYulong666/astra-agent/internal/trace"
 )
@@ -80,6 +83,11 @@ type Config struct {
 	// Collab 多 agent 协作（父 run 派生子 agent）；Ledger 用户视角行动账本。
 	Collab collab.Coordinator
 	Ledger activity.Ledger
+	// 自闭环：能力注册表 / 技能注册表 / 失败诊断。
+	// 三者都允许 nil（能力没配好时降级，平台照常启动）。
+	Capabilities capability.Registry
+	SkillHub     skillhub.Hub
+	Insights     insight.Store
 
 	TraceEndpoint     string
 	TraceDashboardURL string
@@ -222,6 +230,13 @@ func Handler(cfg Config) (http.Handler, error) {
 	mux.HandleFunc("GET /v1/runs/{id}/activity", h.authed(h.runActivity, auth.ActionSessionRead))
 	mux.HandleFunc("GET /v1/sessions/{id}/activity", h.authed(h.sessionActivity, auth.ActionSessionRead))
 
+	// ── 自闭环：能力发现 / 技能注册 / 失败诊断 ─────────────────
+	mux.HandleFunc("GET /v1/capabilities", h.authed(h.listCapabilities, auth.ActionSessionRead))
+	mux.HandleFunc("GET /v1/capabilities/{name}", h.authed(h.getCapability, auth.ActionSessionRead))
+	mux.HandleFunc("GET /v1/skills", h.authed(h.listSkills, auth.ActionSessionRead))
+	mux.HandleFunc("GET /v1/skills/{name}", h.authed(h.getSkill, auth.ActionSessionRead))
+	mux.HandleFunc("GET /v1/insights", h.authed(h.listInsights, auth.ActionAuditRead))
+
 	// ── 浏览器 ──────────────────────────────────────────────────
 	mux.HandleFunc("POST /v1/sessions/{id}/browser", h.authed(h.launchBrowser, auth.ActionRunCreate))
 	mux.HandleFunc("GET /v1/sessions/{id}/browser", h.authed(h.getBrowser, auth.ActionSessionRead))
@@ -275,6 +290,21 @@ func (h *handler) authed(fn http.HandlerFunc, act auth.Action) http.HandlerFunc 
 				return
 			}
 			fail(w, http.StatusUnauthorized, "需要登录")
+			return
+		}
+
+		// 沙箱凭据走独立分支：白名单本身就是它的权限边界，不再过 RBAC。
+		// 放在 Authenticate 之前，因为 Authenticate 会拒绝 scope 非空的 token。
+		if p, isSandbox, valid := h.trySandboxAuth(r); isSandbox {
+			if !valid {
+				fail(w, http.StatusUnauthorized, "沙箱凭据无效或已过期")
+				return
+			}
+			if !h.sandboxPathAllowed(r) {
+				fail(w, http.StatusForbidden, "沙箱凭据无权访问该端点")
+				return
+			}
+			fn(w, r.WithContext(auth.WithPrincipal(r.Context(), p)))
 			return
 		}
 

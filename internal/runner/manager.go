@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ import (
 	"github.com/WangYulong666/astra-agent/internal/connector"
 	"github.com/WangYulong666/astra-agent/internal/egress"
 	"github.com/WangYulong666/astra-agent/internal/eventbus"
+	"github.com/WangYulong666/astra-agent/internal/insight"
 	"github.com/WangYulong666/astra-agent/internal/obs"
 	"github.com/WangYulong666/astra-agent/internal/sandbox"
 	"github.com/WangYulong666/astra-agent/internal/store"
@@ -71,6 +73,58 @@ type Config struct {
 	// 默认 false：规则写错或代理没起会让所有 agent 断网，必须由部署方显式开启。
 	// 只在 Egress 已启用时生效，否则 app 层会忽略并告警。
 	NetworkLock bool
+
+	// 自闭环：沙箱内原子能力所需的运行时上下文。
+	// 这些值在 runner.New 之后才齐（控制面实际监听地址、insights store），
+	// 所以用可变的 RuntimeHints 传指针，app 装配完再 Set，不改 Config 值语义。
+	Hints *RuntimeHints
+	// SandboxKeyIssuer 签发会话级受限凭据。nil 表示不注入（兼容模式）。
+	SandboxKeyIssuer SandboxKeyIssuer
+	// InsightReplay 是否把上一轮失败诊断作为 prompt 前缀回灌。
+	InsightReplay bool
+}
+
+// SandboxKeyIssuer 是 auth.Service 的子集。用窄接口是为了让 runner 不依赖
+// 具体鉴权实现，也方便测试塞假签发器。
+type SandboxKeyIssuer interface {
+	IssueSandboxKey(tenantID, userID, sessionID string, ttl time.Duration) (string, time.Time, error)
+}
+
+// RuntimeHints 持有「装配后期才确定」的运行时信息。
+type RuntimeHints struct {
+	mu              sync.RWMutex
+	insights        insight.Store
+	controlPlaneURL string
+	cliBin          string
+}
+
+func NewRuntimeHints() *RuntimeHints { return &RuntimeHints{} }
+
+func (h *RuntimeHints) Set(ins insight.Store, url, cli string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.insights, h.controlPlaneURL, h.cliBin = ins, url, cli
+	h.mu.Unlock()
+}
+
+func (h *RuntimeHints) SetURL(url string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.controlPlaneURL = url
+	h.mu.Unlock()
+}
+
+func (h *RuntimeHints) Snapshot() (insight.Store, string, string) {
+	if h == nil {
+		return nil, "", ""
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.insights, h.controlPlaneURL, h.cliBin
 }
 
 // Manager 管理全部会话。并发安全。
@@ -226,6 +280,34 @@ func (m *Manager) CreateSession(ctx context.Context, opts CreateSessionOptions) 
 				m.log.Printf("会话 %s 注入连接器凭据失败（不影响会话）: %v", id, err)
 			} else {
 				spec.Env = mergeEnv(spec.Env, env)
+			}
+		}
+	}
+
+	// 让沙箱里的 astra-cli 真能跑：地址 + 会话级受限凭据 + 二进制路径。
+	// 凭据用 scope=sandbox 的短期 key，不是平台 JWT；API 侧有窄白名单与归属校验。
+	if h := m.cfg.Hints; h != nil {
+		_, url, cli := h.Snapshot()
+		env := map[string]string{}
+		if url != "" {
+			env["ASTRA_SERVER"] = url
+		}
+		if cli != "" {
+			env["ASTRA_CLI_BIN"] = cli
+		}
+		if m.cfg.SandboxKeyIssuer != nil && opts.TenantID != "" && opts.UserID != "" {
+			if tok, _, err := m.cfg.SandboxKeyIssuer.IssueSandboxKey(
+				opts.TenantID, opts.UserID, id, 0); err == nil {
+				env["ASTRA_TOKEN"] = tok
+			} else {
+				m.log.Printf("会话 %s 签发沙箱凭据失败（skill 内 CLI 将不可用）: %v", id, err)
+			}
+		}
+		spec.Env = mergeEnv(spec.Env, env)
+		// 开了网络锁时，控制面回环地址必须显式放行，否则 CLI 连不上 7788。
+		if m.cfg.NetworkLock && url != "" && spec.NetworkPolicy != nil {
+			if hp := hostPortOf(url); hp != "" {
+				spec.NetworkPolicy.ExtraAllow = append(spec.NetworkPolicy.ExtraAllow, hp)
 			}
 		}
 	}
@@ -421,6 +503,18 @@ func (m *Manager) StartRunWithParent(ctx context.Context, sessionID, input, pare
 		sess.Title = summarizeInput(input)
 		if err := m.cfg.Store.PutSession(ctx, sess); err != nil {
 			m.log.Printf("写会话标题失败 %s: %v", sess.ID, err)
+		}
+	}
+
+	// 失败诊断回灌：把同会话最近一条诊断作为明确的上下文前缀，
+	// 不改写用户输入的语义，也不自动重试/改参数（研究里自动改代码已有作弊风险）。
+	if m.cfg.InsightReplay && m.cfg.Hints != nil {
+		if ins, _, _ := m.cfg.Hints.Snapshot(); ins != nil {
+			if ds, err := ins.Recent(ctx, sessionID, 1); err == nil && len(ds) > 0 {
+				d := ds[0]
+				input = "[上轮失败上下文] " + d.Error + "；建议：" + d.Suggestion +
+					"\n\n[本轮指令]\n" + input
+			}
 		}
 	}
 
@@ -1136,4 +1230,14 @@ func newID() string {
 	var b [12]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
+}
+
+// hostPortOf 从 "http://127.0.0.1:7788" 取出 "127.0.0.1:7788"，
+// 供 Seatbelt 的 ExtraAllow 使用（SBPL 只认数值/ localhost + 端口）。
+func hostPortOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return u.Host
 }

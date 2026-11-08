@@ -62,6 +62,10 @@ tags:
     description: "多 agent 协作：父 run 派生独立沙箱的子 agent 并等它回话。"
   - name: Activity
     description: "用户视角行动账本：做了什么、卡在哪、为什么停了。"
+  - name: Capabilities
+    description: "机器可读的能力注册表（API / CLI / skill），支持渐进式披露。"
+  - name: Insights
+    description: "失败 run 的结构化诊断，可回灌到下一轮上下文。"
   - name: Meta
     description: "运行信息与契约本身。"
 
@@ -2097,6 +2101,112 @@ paths:
       responses:
         "200":
           description: "按时间排序的条目列表。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/capabilities:
+    get:
+      operationId: list_capabilities
+      summary: "能力清单第一层：只返回名称、类型、描述与启用状态。"
+      tags: [Capabilities]
+      parameters:
+        - name: detail
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [full]
+          description: "full 才返回 endpoint / requiredEnv / requires。"
+      responses:
+        "200":
+          description: "能力摘要列表。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/capabilities/{name}:
+    get:
+      operationId: get_capability
+      summary: "能力第三层：单项全文，skill 会带 SKILL.md 正文。"
+      tags: [Capabilities]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "能力名（operationId 或 CLI 命令名或 skill 名）。"
+      responses:
+        "200":
+          description: "能力详情。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/skills:
+    get:
+      operationId: list_skills
+      summary: "已注册技能清单（内置 + 轨迹沉淀），不再是前端硬编码。"
+      tags: [Capabilities]
+      responses:
+        "200":
+          description: "技能列表，含 requires 校验结果。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/skills/{name}:
+    get:
+      operationId: get_skill
+      summary: "读取单个技能的完整 SKILL.md。"
+      tags: [Capabilities]
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "技能名。"
+      responses:
+        "200":
+          description: "技能详情。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/insights:
+    get:
+      operationId: list_insights
+      summary: "失败 run 的结构化诊断与可执行建议。"
+      tags: [Insights]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+          description: "返回条数上限。"
+        - name: session_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "按会话过滤；留空返回全租户。"
+      responses:
+        "200":
+          description: "诊断列表。"
         "503":
           description: "能力未启用。"
           content:
