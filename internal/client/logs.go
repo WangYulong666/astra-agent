@@ -187,3 +187,46 @@ func (c *Client) Billing(ctx context.Context) (map[string]any, error) {
 	err := c.do(ctx, http.MethodGet, "/v1/usage/billing", nil, nil, &out)
 	return out, err
 }
+
+// Insight 是后端 GET /v1/insights 返回的一条失败 run 结构化诊断。
+// 字段与 internal/insight.Diagnosis 对齐，但不 import 服务端包——client 是给
+// 外部程序用的，只认 JSON 形状。CLI 的「回灌下一轮」不在这里做，这里只翻译协议。
+type Insight struct {
+	RunID      string    `json:"runId"`
+	SessionID  string    `json:"sessionId"`
+	Status     string    `json:"status"`
+	Error      string    `json:"error"`
+	LastTool   string    `json:"lastTool,omitempty"`
+	Suggestion string    `json:"suggestion"`
+	ToolCount  int       `json:"toolCount"`
+	Blocked    int       `json:"blocked"`
+	Failed     int       `json:"failed"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
+// AdminInsights 查失败诊断（按时间倒序）。sessionID 非空时按会话过滤，
+// 留空查全租户（需要 owner/admin）。limit<=0 用服务端默认 50，上限 500。
+// 权限与 /v1/insights 一致：需要 audit:read。
+func (c *Client) AdminInsights(ctx context.Context, sessionID string, limit int) ([]Insight, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	params := url.Values{}
+	params.Set("limit", strconv.Itoa(limit))
+	if sessionID != "" {
+		params.Set("session_id", sessionID)
+	}
+	var out struct {
+		Items []Insight `json:"items"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/insights", params, nil, &out); err != nil {
+		return nil, err
+	}
+	if out.Items == nil {
+		out.Items = []Insight{}
+	}
+	return out.Items, nil
+}

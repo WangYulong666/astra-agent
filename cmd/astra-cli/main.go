@@ -284,6 +284,7 @@ func (a *app) printMainHelp() {
   memory stats                                              记忆统计（不含内容）
   skills list                                               列出内置 skill
   skills show <名称>                                         打印 SKILL.md
+  skills check                                              校验 requires（仅 astra-cli 缺失才失败）
   skills install <名称> [--dest DIR] [--from DIR]            安装 skill 到本地目录
   version                                                   打印版本
 

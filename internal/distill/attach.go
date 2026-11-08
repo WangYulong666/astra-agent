@@ -33,9 +33,9 @@ const (
 // Attach 订阅 hub，在 run 终态自动生成草稿。返回 stop：等所有在飞的沉淀
 // goroutine 退出，调用方（装配层）在关停时调用，不许泄漏。
 //
-// DISTILL_AUTO=false 时直接返回 noop：不订阅、不起 goroutine。
+// DISTILL_AUTO 关闭时直接返回 noop：不订阅、不起 goroutine。
 func Attach(hub *eventbus.Hub, d Distiller, st store.Store, lg *log.Logger) func() {
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("DISTILL_AUTO")), "false") {
+	if !distillAutoEnabled() {
 		return func() {}
 	}
 	if lg == nil {
@@ -82,7 +82,9 @@ func (a *attacher) onEvent(ev store.Event) {
 	if ev.Type != store.EventState || ev.RunID == "" {
 		return
 	}
-	if !store.IsTerminal(payloadStatus(ev.Payload)) {
+	// 只对成功（completed）的轨迹自动沉淀：IsTerminal 还含 failed/cancelled，
+	// 失败轨迹刷出来的草稿是噪音，人会误以为可复用。严格等于 completed。
+	if payloadStatus(ev.Payload) != store.RunCompleted {
 		return
 	}
 
@@ -186,4 +188,19 @@ func payloadStatus(raw json.RawMessage) string {
 		return ""
 	}
 	return p.Status
+}
+
+// distillAutoEnabled 解析 DISTILL_AUTO：false / 0 / no / off 为关，其余
+// （含未设置、空串、任意其它值）一律为开（默认开）。
+//
+// 自己实现而不是 import app：这里只认「运维写关」的几种常见写法，语义与
+// app 层的 envBool 对齐但更宽松——旧实现只认字面 "false"，写 0 / no / off
+// 会静默失效。大小写不敏感、去掉首尾空白。
+func distillAutoEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("DISTILL_AUTO"))) {
+	case "false", "0", "no", "off":
+		return false
+	default:
+		return true
+	}
 }

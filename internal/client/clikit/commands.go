@@ -77,6 +77,7 @@ var knownCommands = []CommandSpec{
 	{"admin-cli", "logs approvals", `admin-cli logs approvals <runID>`, "待决 / 已决的人工审批", nil},
 	{"admin-cli", "logs usage", `admin-cli logs usage [--from T] [--to T] [--limit N] [--user ID]`, "用量流水", nil},
 	{"admin-cli", "logs billing", `admin-cli logs billing`, "本月账单", nil},
+	{"admin-cli", "logs insights", `admin-cli logs insights [--limit N] [--session ID]`, "失败 run 的结构化诊断与建议", []string{"insights"}},
 
 	{"admin-cli", "obs status", `admin-cli obs status`, "观测能力状态与所需环境变量", []string{"trace"}},
 	{"admin-cli", "obs traces", `admin-cli obs traces [--run RUN_ID] [--limit 20]`, "trace 反查", []string{"trace"}},

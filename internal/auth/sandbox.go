@@ -28,7 +28,11 @@ import (
 // VirtualKeyScope（"llm"）互斥，是三类 token 唯一的区分标记。
 const SandboxKeyScope = "sandbox"
 
-// DefaultSandboxKeyTTL 沙箱 key 默认有效期，与设计文档一致（2h，随会话销毁自然失效）。
+// DefaultSandboxKeyTTL 沙箱 key 默认有效期，与设计文档一致（2h）。
+//
+// 注意「随会话销毁自然失效」不是 TTL 的功劳：会话存在性校验在 api 层
+// trySandboxAuth（那里才有 Store），删会话即吊销；TTL 只作兜底，限制 key
+// 泄露后没人删会话时的最大可利用窗口。auth 包没有 Store，不在这里做该校验。
 //
 // 单独一个常量而不是复用 DefaultVirtualKeyTTL：两类 token 的 TTL 策略此刻恰好都是
 // 2h，但一个绑模型网关、一个绑沙箱内 CLI，将来调整其一不应悄悄改动另一个。

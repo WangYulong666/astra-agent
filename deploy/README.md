@@ -29,7 +29,7 @@ deploy/
 │   │   ├── postgres.yaml        # 开发用 PG：StatefulSet + headless Svc + PVC
 │   │   ├── migrate-job.yaml     # 建表 Job（在 api 之前跑完）
 │   │   ├── schema/              # ⚠️ 迁移 DDL，与 Go 源码逐字节一致（脚本校验）
-│   │   ├── astra-api.yaml       # 无状态，3 副本
+│   │   ├── astra-api.yaml       # 单副本（单机文件 + 进程内单例，不可扩缩）
 │   │   ├── astra-worker.yaml    # StatefulSet，稳定标识参与会话哈希
 │   │   ├── astra-sandboxd.yaml  # 2 副本 + Lease 选主
 │   │   ├── astra-gateway.yaml   # LLM 网关 + MCP server
@@ -55,20 +55,28 @@ deploy/
 
 ## 配置是怎么进容器的（先看这段，否则改清单会改错地方）
 
-`cmd/astra-server` 是**纯 flag 程序**：用标准库 `flag` 解析，**不读任何环境变量**
-（唯一的例外是 `-llm-key` 为空时会回落读 `DEEPSEEK_API_KEY`）。
+配置分两类，注入方式完全不同，**别混**：
 
-所以清单里没有「设个 `ASTRA_XXX` 环境变量让程序自己读」这种写法——那样写了也不生效。
-实际做法是：**值放 ConfigMap/Secret → 注入成容器 env → 用 `$(VAR)` 在 args 里展开**，
-把 env 纯粹当作「参数传递的载体」：
+1. **启动参数（flag）**。`cmd/astra-server` 用标准库 `flag` 解析命令行，flag
+   本身不读同名环境变量。做法是 **值放 ConfigMap/Secret → 注入成容器 env →
+   用 `$(VAR)` 在 args 里展开**，env 纯粹是「参数传递的载体」：
 
-```yaml
-env:
-  - name: ASTRA_PG_DSN
-    valueFrom: { secretKeyRef: { name: astra-db, key: dsn } }
-args:
-  - "-dsn=$(ASTRA_PG_DSN)"      # k8s 先替换，再把结果当命令行参数
-```
+   ```yaml
+   env:
+     - name: ASTRA_PG_DSN
+       valueFrom: { secretKeyRef: { name: astra-db, key: dsn } }
+   args:
+     - "-dsn=$(ASTRA_PG_DSN)"      # k8s 先替换，再把结果当命令行参数
+   ```
+
+   所以「设个 `ASTRA_XXX` 环境变量指望程序自己读」对这类 flag 不生效
+   （唯一例外：`-llm-key` 为空时回落读 `DEEPSEEK_API_KEY`）。
+2. **可选能力**。记忆 / 观测 / 技能沉淀 / 诊断回灌 / 技能目录 / CLI 路径不是
+   flag，程序通过 `os.Getenv` 在 `internal/app/capabilities.go` 等处**直接读**
+   （`LANGFUSE_*`、`MILVUS_*`、`DISTILL_AUTO`、`INSIGHT_REPLAY`、`SKILL_DIR`、
+   `ASTRA_CLI_BIN`、`ASTRA_AGENT_NAME`…）。这类 env 就是真配置，k8s 里直接以
+   字面值或 `valueFrom` 注入容器 env（见 `base/astra-api.yaml` 的「可选能力」块），
+   **不进 `$(VAR)`、也不放 ConfigMap 的 flag 载体里**。留空 = 关闭 / 用代码默认值。
 
 | 配置项 | 来源 | 传法 | 说明 |
 |---|---|---|---|
@@ -79,6 +87,21 @@ args:
 | 上游地址 | ConfigMap `llm-upstream` | `-llm-upstream=$(...)` | 默认 `https://api.deepseek.com`，不带 `/v1` |
 | 上游 key | Secret `astra-llm/api-key` | `-llm-key=$(ASTRA_LLM_KEY)` | 见下面的取舍说明 |
 | 沙箱 agent 的 base_url | ConfigMap `llm-public-url` | `-agent-env=OPENAI_BASE_URL=$(...)` | 走 `-agent-env` 转发给 agent 子进程 |
+
+**可选能力 env**（`base/astra-api.yaml` 的「可选能力」块，程序 `os.Getenv` 直读，
+不是 flag、不进 `$(VAR)`；留空 = 关 / 用默认，要开就填值或用 overlay 覆盖）：
+
+| env | 默认 | 作用 |
+|---|---|---|
+| `LANGFUSE_HOST` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | 空（关） | 观测；三项一起填才生效 |
+| `MILVUS_ADDR` | 空（关） | 长期记忆；填 Milvus 地址开启 |
+| `SKILL_DIR` | `/data/skills` | 技能正文 / `index.json` / `drafts.json` 目录（单机文件） |
+| `DISTILL_AUTO` | `true` | 成功 run 自动沉淀 skill 草稿 |
+| `INSIGHT_REPLAY` | `true` | 失败诊断回灌下一轮 prompt |
+| `ASTRA_CLI_BIN` | 空（自动定位） | 留空找 `<dataDir>/bin/astra-cli` |
+
+密钥类（`LANGFUSE_SECRET_KEY`）别在清单里写明文，生产改用 `valueFrom.secretKeyRef`
+或 External Secrets；清单里给的是空占位。
 
 两个刻意的取舍：
 
@@ -212,7 +235,7 @@ kubectl apply -k k8s/base
 | 缺什么 | 现状 | 影响 |
 |---|---|---|
 | `astra-worker` / `astra-sandboxd` / `astra-gateway` | `cmd/` 下只有 `astra-server` | 三份清单**已移到 `k8s/future/`**，不参与 apply。留在 base 里只会让 `apply -k` 得到三个 `ImagePullBackOff`，把真问题淹掉 |
-| 多副本 | 审批注册表在内存（`internal/runner/approval.go` 的 `sync.Map`） | 副本数必须保持 1。A 副本挂起的审批，B 副本上的用户点不到 |
+| 多副本 | 单机文件 + 进程内单例：`insights.json`（失败诊断）、`index.json`（技能索引）、`drafts.json`（沉淀草稿）、`SKILL_DIR/`（技能正文），以及 `internal/runner/approval.go` 的内存审批注册表 `sync.Map` | 副本数必须保持 1（`astra-api.yaml` 已固定 `replicas: 1`）。多副本各写各的文件、请求随机路由会读不到别的副本写的内容；A 副本挂起的审批，B 副本上的用户点不到。设计文档 §7 明确不做多副本共享（PG 化另排） |
 | `ci/build.sh` 的 `BINS=(api worker sandboxd gateway)` | 只对应得上 `astra-server` 一个二进制 | CI 只能产出 `astra-api` 镜像 |
 | `astra-worker drain` 子命令（preStop 用） | 不存在 | 与 worker 一起实现 |
 
@@ -289,9 +312,11 @@ bash tools/check-deploy.sh     # 失败退出码非 0，可直接挂 CI 的 veri
 ### 定位：这两套是**可选能力**
 
 缺了它们平台照常启动：`MILVUS_ADDR` 留空就是记忆关闭，`LANGFUSE_HOST` 留空就是观测关闭
-（`/v1/meta` 里能看出哪些能力关着）。所以它们**不进** `deploy/k8s/base`，
-也**不进** `make serve` 的启动路径——把可选依赖塞进主流程，等于让「没装 docker」
-阻塞整个开发流。
+（`/v1/meta` 里能看出哪些能力关着）。所以 Milvus / Langfuse **服务本身**不进
+`deploy/k8s/base`，也不进 `make serve` 的启动路径——把可选依赖塞进主流程，等于让
+「没装 docker」阻塞整个开发流。但 `base/astra-api.yaml` 的 Deployment **已经注入了
+这些开关的 env**（默认留空=关，见上面「可选能力 env」表），k8s 部署想开就填值或
+由 overlay 覆盖，不再是「无从开启」。
 
 ### 服务清单与端口
 
@@ -552,8 +577,11 @@ kubectl -n astra-data create secret generic vector-s3 \
 1. `LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT` 指的是集群内地址 → **UI 里点开附件会 404**。
    要修得先决定入口方案（APISIX 的路由 + 一个能转发到 `langfuse-seaweedfs:8333`
    的规则），那是独立的一件事，硬编一个域名只会让 apply 失败。
-2. `LANGFUSE_HOST` 消费者（`astra-api`）还没有对应的 flag/环境变量接入点——
-   属于 obs 模块与主控的接口，不在本目录。
+2. `LANGFUSE_HOST` 等可选能力现在**有接入点了**：`base/astra-api.yaml` 的
+   「可选能力」env 块直接注入 `LANGFUSE_*` / `MILVUS_ADDR` 等（程序走
+   `os.Getenv`），默认留空=关、填上即开。剩下的限制是值本身：集群内 Langfuse /
+   Milvus 要先用 `deploy/k8s/observability/`、`deploy/k8s/vector/` 部署好，
+   且密钥类应改用 `valueFrom.secretKeyRef` / ESO，别在清单里写明文。
 3. 没有 NetworkPolicy：`astra-ops` 里的 clickhouse/valkey 对外是「集群内谁都能连」。
 4. clickhouse 单副本 = 数据只有一个节点上的一份。要正经用，先上 ClickHouse Operator
    （Langfuse 官方推荐的形态），而不是给这个 StatefulSet 加 replicas。

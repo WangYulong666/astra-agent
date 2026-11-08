@@ -338,3 +338,92 @@ func TestStoreSharedByDataDir(t *testing.T) {
 		t.Fatal("同一个 dataDir 没有共享实例")
 	}
 }
+
+// Pending 只返回「未消费 + 晚于 since + 同会话」的诊断；MarkConsumed 落盘且幂等。
+// 这两条是回灌不重复注入的存储层契约。
+func TestStoreMarkConsumedAndPending(t *testing.T) {
+	s, fs, path := newStore(t)
+	consumedAt := testBase.Add(10 * time.Hour)
+	items := []Diagnosis{
+		{RunID: "r1", SessionID: "s1", Status: "failed", Error: "e1", CreatedAt: testBase.Add(time.Hour)},
+		{RunID: "r2", SessionID: "s1", Status: "failed", Error: "e2", CreatedAt: testBase.Add(2 * time.Hour), ConsumedAt: &consumedAt},
+		{RunID: "r3", SessionID: "s1", Status: "failed", Error: "e3", CreatedAt: testBase.Add(30 * time.Minute)}, // 早于 since
+		{RunID: "r4", SessionID: "s2", Status: "failed", Error: "e4", CreatedAt: testBase.Add(3 * time.Hour)},    // 别的会话
+	}
+	seedItems(t, fs, items)
+
+	ctx := context.Background()
+	since := testBase.Add(45 * time.Minute)
+	pending, err := s.Pending(ctx, "s1", since, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].RunID != "r1" {
+		t.Fatalf("Pending 应只返回 r1（未消费/晚于 since/同会话）, got %+v", pending)
+	}
+
+	// 标记 r1 已消费后，Pending 不再返回它；Recent 仍能看到（兼容既有读接口）。
+	if err := s.MarkConsumed(ctx, "r1"); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ = s.Pending(ctx, "s1", since, 0)
+	if len(pending) != 0 {
+		t.Fatalf("消费后 Pending 应为空, got %+v", pending)
+	}
+	got, err := s.ForRun(ctx, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ConsumedAt == nil {
+		t.Fatal("MarkConsumed 后 ConsumedAt 未填")
+	}
+	recent, _ := s.Recent(ctx, "s1", 0)
+	if len(recent) != 3 {
+		t.Fatalf("Recent 应仍返回该会话全部 3 条, got %d", len(recent))
+	}
+
+	// 幂等：重复标记 / 标记不存在的 runID 都不报错。
+	if err := s.MarkConsumed(ctx, "r1"); err != nil {
+		t.Fatalf("重复 MarkConsumed 不该报错: %v", err)
+	}
+	if err := s.MarkConsumed(ctx, "nope"); err != nil {
+		t.Fatalf("标记不存在的 runID 不该报错: %v", err)
+	}
+
+	// consumedAt 要真正落盘（omitempty：未消费的记录不带这个字段）。
+	b, _ := os.ReadFile(path)
+	var onDisk []map[string]any
+	if err := json.Unmarshal(b, &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	seenConsumed := 0
+	for _, d := range onDisk {
+		if _, ok := d["consumedAt"]; ok {
+			seenConsumed++
+		}
+	}
+	if seenConsumed != 2 { // r1（刚标记）+ r2（预置）
+		t.Fatalf("落盘的 consumedAt 条数 = %d, want 2", seenConsumed)
+	}
+}
+
+func TestStorePendingDefaultLimitAndSinceZero(t *testing.T) {
+	s, fs, _ := newStore(t)
+	var items []Diagnosis
+	for i := 0; i < 25; i++ {
+		items = append(items, mkDiag(fmt.Sprintf("p-%02d", i), "s1",
+			testBase.Add(time.Duration(i)*time.Minute)))
+	}
+	seedItems(t, fs, items)
+	// since 为零值时全部未消费诊断都算「晚于 since」；limit<=0 用默认上限。
+	got, err := s.Pending(context.Background(), "s1", time.Time{}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != defaultRecentLimit {
+		t.Fatalf("limit<=0 默认应 %d 条, got %d", defaultRecentLimit, len(got))
+	}
+	if got[0].RunID != "p-24" {
+		t.Fatalf("未按 CreatedAt 倒序: 首 = %q", got[0].RunID)
+	}
+}

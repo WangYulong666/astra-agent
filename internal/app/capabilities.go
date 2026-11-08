@@ -9,6 +9,7 @@ package app
 
 import (
 	"context"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -417,21 +418,83 @@ func requiredEnvForTag(tag, path string) []string {
 	return nil
 }
 
-func resolveCLIBin(cfg Config, lg *log.Logger) string {
-	if v := os.Getenv("ASTRA_CLI_BIN"); v != "" {
-		return v
-	}
-	cands := []string{filepath.Join(cfg.DataDir, "bin", "astra-cli")}
+// ensureCLIBin 定位 astra-cli，并在必要时把它拷进 <dataDir>/bin/。
+//
+// 查找顺序：ASTRA_CLI_BIN env → <dataDir>/bin/astra-cli → os.Executable() 同目录。
+// make build 把 astra-cli 产物放在与服务二进制相同的 bin/ 下，但沙箱按
+// <dataDir>/bin/astra-cli 取绝对路径（稳定、与发行目录解耦），所以第三种命中时
+// 要拷过去：只要构建产物就位，闭环就自动可用，不必等人手动 cp。
+//
+// 拷贝失败 / 找不到都只记日志并返回空串，绝不让 app.New 失败；空串时由
+// skillhub 把 requires 标 unavailable 降级（见 openSkillHub）。
+func ensureCLIBin(cfg Config, lg *log.Logger) string {
+	exeDir := ""
 	if exe, err := os.Executable(); err == nil {
-		cands = append(cands, filepath.Join(filepath.Dir(exe), "astra-cli"))
+		exeDir = filepath.Dir(exe)
 	}
-	for _, p := range cands {
-		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
-			return p
+	return ensureCLIBinFrom(cfg, lg, os.Getenv("ASTRA_CLI_BIN"), exeDir)
+}
+
+// ensureCLIBinFrom 是 ensureCLIBin 的可测内核：把「读环境变量 / os.Executable」
+// 这类进程级副作用留在外层，测试可以精确控制候选目录。
+func ensureCLIBinFrom(cfg Config, lg *log.Logger, envBin, exeDir string) string {
+	if envBin != "" {
+		return envBin
+	}
+	dst := filepath.Join(cfg.DataDir, "bin", "astra-cli")
+	if isExecutable(dst) {
+		return dst
+	}
+	if exeDir != "" {
+		src := filepath.Join(exeDir, "astra-cli")
+		if isExecutable(src) {
+			if err := copyCLIBin(src, dst); err != nil {
+				lg.Printf("⚠ 拷贝 astra-cli 到 %s 失败（requires 会标记 unavailable）: %v", dst, err)
+				return ""
+			}
+			return dst
 		}
 	}
 	lg.Printf("⚠ 未找到 astra-cli 二进制：skill 的 requires 会标记为 unavailable")
 	return ""
+}
+
+func isExecutable(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && !st.IsDir() && st.Mode()&0o111 != 0
+}
+
+// copyCLIBin 把 src 拷到 dst（0755）。先写唯一临时文件再 rename：中途失败不会
+// 在 <dataDir>/bin/ 留下一个「可执行但是半截」的 astra-cli，那会让下次启动
+// 误判成可用。
+func copyCLIBin(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".astra-cli-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // rename 成功后 Remove 返回 not-exist，忽略
+	if _, err := io.Copy(tmp, in); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o755); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, dst)
 }
 
 func openSkillHub(lg *log.Logger, cfg Config, hub *eventbus.Hub,

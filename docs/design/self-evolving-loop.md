@@ -63,12 +63,14 @@
 绝不给沙箱注入长期 token 或平台 JWT。新增 `auth.Service.IssueSandboxKey(tenant,user,session,ttl)`：
 
 - scope 固定 `sandbox`，与平台 JWT（scope 空）、LLM 虚拟 key（scope `llm`）三者互斥，共用同一签名密钥但校验路径分开；`Authenticate` 继续拒绝 scope 非空的 token。
-- API 侧新增窄白名单分支：**只**允许
-  `/v1/capabilities*`、`/v1/skills*`、`/v1/meta`、
-  `/v1/sessions/{own}`、`/v1/memory/*`（限定该 session 归属）、
-  `/v1/runs/{own}/*`。
-- 路径里的 session/run 必须属于该 `sessionID`，跨会话一律 404（不给存在性探测口子）。
-- TTL 默认 2h，随会话销毁自然失效。
+- API 侧新增窄白名单分支，**实际放开的集合**以 `internal/api/sandbox_authz.go` 的 `sandboxPathAllowed` 为准（且仅 GET）：
+  `/v1/meta`、`/v1/capabilities`、`/v1/capabilities/{name}`、
+  `/v1/skills`、`/v1/skills/{name}`（`drafts*` 管理子命名空间除外）、
+  `/v1/memory/*`（handler 按登录身份的 tenant+user 过滤，沙箱 key 填同源 `Principal`，无需额外路径校验）。
+  **白名单外一律拒绝**（`authed` 直接 403，不是 404）。
+- **会话存在性校验 = 吊销机制**：`trySandboxAuth` 验签通过后用 `Store.GetSession(ctx, claims.SessionID)` 复核，查不到、或 `sess.Status == store.SessionDeleted` → 判沙箱凭据失效。`DELETE /v1/sessions/{id}` 先软删标 `SessionDeleted`、再删目录，两种状态都拦得住，所以**删会话即吊销**，无需全局吊销表/黑名单。TTL 默认 2h 只作兜底，限制 key 泄露后的最大可利用窗口。`Store` 为 nil 时 fail-closed，不留静默放行。
+- **泄露处置 SOP**：删掉对应会话即可，不用轮换 JWT 密钥（不会全员掉线）；轮换密钥仅用于密钥本身泄露。
+- `/v1/sessions/{id}` 与 `/v1/runs/{id}/*` **下一轮才考虑**放开：那需要逐条路径做 session/run 归属校验，漏一条就是横向越权；且 `sandboxSessionID` 注入的 context 值目前没有生产消费者（只有测试读它）。本轮不扩大白名单，也不承诺跨会话 404。
 
 `CreateSession` 注入 `ASTRA_SERVER`（回环可达地址）、`ASTRA_TOKEN`（sandbox key）、`ASTRA_CLI_BIN`、`ASTRA_SANDBOX_ID`；
 控制面回环端口自动进 `NetworkPolicy.ExtraAllow`；`astra-cli` 二进制由 app 在启动时编/拷到 `<dataDir>/bin/`，通过 `AgentSpec.Env` 给绝对路径，并在 `childEnv` 里加进 PATH。
@@ -165,7 +167,7 @@ func Open(dataDir string) (Store, error)
 
 1. `GET /v1/capabilities` 能列出 API / CLI / skill 三类，数量与 `codeRoutes`、两个 CLI 命令表、skills 目录一致（契约测试防漂移）。
 2. `GET /v1/skills` 能看到 **distill accept 后新增**的 skill（不是硬编码 3 个）。
-3. **真机**：起服务 → 建会话 → 在沙箱里执行 `astra-cli whoami` 与 `astra-cli skills list`，返回 200 且身份是该会话；用 sandbox key 访问别的会话 → 404。
+3. **真机**：起服务 → 建会话 → 在沙箱里执行 `astra-cli whoami` 与 `astra-cli skills list`，返回 200 且身份是该会话；**白名单外一律拒绝**（含 `/v1/sessions/*`、`/v1/runs/*`，API 返回 403）——本轮未放开这些路径，也没有逐路径归属校验，故不再写「跨会话 404」。删掉会话后，已签发的 sandbox key 立即失效（会话存在性校验），无需轮换密钥。
 4. 一条成功的 run（≥2 工具调用）结束后，`GET /v1/skills/drafts` 自动多一条草稿（不用手工 POST）。
 5. 一条失败 run 后 `GET /v1/insights` 有结构化诊断；下一次 `StartRun` 的 prompt 带上一轮失败上下文（有开关可关）。
 6. `make doctor` 追加三项闭环自检（CLI 可执行 / skills 可读 / `/v1/capabilities` 200）。

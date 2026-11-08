@@ -9,8 +9,8 @@ CWD       ?= /tmp/astra-workspace
 
 .PHONY: help
 help: ## 显示所有目标
-	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
-	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
+	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) \
+	  | awk 'BEGIN {FS = ":.*## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
 # ── 构建与质量 ────────────────────────────────────────────────
 
@@ -23,6 +23,7 @@ build: ## 编译全部二进制到 bin/
 	go build -o $(BIN)/acp-shell-agent ./cmd/acp-shell-agent
 	go build -o $(BIN)/astra-sandbox ./cmd/astra-sandbox
 	go build -o $(BIN)/astra-server ./cmd/astra-server
+	go build -o $(BIN)/astra-cli ./cmd/astra-cli
 	@ls -lh $(BIN)/
 
 # ── 前端 ──────────────────────────────────────────────────────
@@ -324,23 +325,82 @@ deps-status: ## 逐个探测依赖的端口/健康端点，输出「谁没起来
 # 自闭环前提自检：外部依赖全绿不代表 agent 真能干活。
 # Milvus/Langfuse 都起来，但沙箱里没 astra-cli、skills 目录不可读、
 # 控制面能力注册表没开，闭环一样是断的——以前没人检查这三件事。
+#
+# 硬性项（CLI 不可用 / SKILL_DIR 无 skill）任一未就绪 → exit 1；
+# 控制面未起是可选：默认只警告，STRICT=1 / ASTRA_STRICT=1 时也计入失败（供 CI）。
+# /v1/capabilities 与 /v1/skills 要认证（astra-server 默认 -require-auth=true）；
+# 未设 ASTRA_TOKEN 时改探无需认证的 /readyz，至少能给出「控制面活着/没起」的真信号，
+# 不再把恒定 401 误报成「控制面未起」；所有探测一律 --noproxy '*' 防本机代理劫持。
 .PHONY: loop-check
 loop-check: ## 检查自闭环前提（CLI 可执行 / skills 可读 / 能力接口可达）
-	@printf '%-20s ' 'SKILL_DIR'; \
-	dir="$${SKILL_DIR:-$$HOME/.astra/skills}"; \
-	if [ -d "$$dir" ] && [ -r "$$dir" ]; then printf '\033[32mOK\033[0m  %s\n' "$$dir"; \
-	else printf '\033[33m未就绪\033[0m  建目录并跑一次服务让它同步内置 skill：mkdir -p %s\n' "$$dir"; fi; \
-	printf '%-20s ' 'astra-cli'; \
-	bin="$${ASTRA_CLI_BIN:-$$(command -v astra-cli || true)}"; \
-	if [ -n "$$bin" ] && [ -x "$$bin" ]; then printf '\033[32mOK\033[0m  %s\n' "$$bin"; \
-	else printf '\033[33m未就绪\033[0m  make build 后把 astra-cli 放进 PATH，或设 ASTRA_CLI_BIN\n'; fi; \
-	printf '%-20s ' '/v1/capabilities'; \
+	@STRICT="$${ASTRA_STRICT:-$(STRICT)}"; \
 	srv="$${ASTRA_SERVER:-http://127.0.0.1:7788}"; \
-	code=$$(curl -s -m 3 -o /dev/null -w '%{http_code}' "$$srv/v1/capabilities" 2>/dev/null || echo 000); \
-	if [ "$$code" = "200" ]; then printf '\033[32mOK\033[0m\n'; \
-	else printf '\033[33mHTTP %s\033[0m  控制面未起或能力注册表未启用（看 /v1/meta 的 capabilities）\n' "$$code"; fi; \
-	printf '%-20s ' '/v1/skills'; \
-	code=$$(curl -s -m 3 -o /dev/null -w '%{http_code}' "$$srv/v1/skills" 2>/dev/null || echo 000); \
-	if [ "$$code" = "200" ]; then printf '\033[32mOK\033[0m\n'; \
-	else printf '\033[33mHTTP %s\033[0m  技能注册表未启用（SKILL_DIR 不可写？）\n' "$$code"; fi; \
+	tok="$${ASTRA_TOKEN:-}"; \
+	hard=0; soft=0; \
+	printf '\033[1m自闭环前提自检\033[0m（硬性项未就绪即 exit 1；STRICT=1 把控制面也算硬失败）\n\n'; \
+	printf '%-20s ' 'SKILL_DIR'; \
+	dir="$${SKILL_DIR:-$$HOME/.astra/skills}"; \
+	has_skill=no; \
+	for md in "$$dir"/*/SKILL.md; do \
+	  if [ -f "$$md" ]; then has_skill=yes; break; fi; \
+	done; \
+	if [ "$$has_skill" = yes ]; then \
+	  printf '\033[32mOK\033[0m  %s（至少有一个 */SKILL.md）\n' "$$dir"; \
+	else \
+	  hard=$$((hard+1)); \
+	  printf '\033[31m失败\033[0m  %s 下没有任何 */SKILL.md；先同步内置 skill：mkdir -p %s 并跑一次服务\n' "$$dir" "$$dir"; \
+	fi; \
+	printf '%-20s ' 'astra-cli'; \
+	cli=""; \
+	if [ -n "$${ASTRA_CLI_BIN:-}" ] && [ -x "$${ASTRA_CLI_BIN}" ]; then \
+	  cli="$${ASTRA_CLI_BIN}"; \
+	elif [ -x "$${ASTRA_DATA:-./data}/bin/astra-cli" ]; then \
+	  cli="$${ASTRA_DATA:-./data}/bin/astra-cli"; \
+	elif command -v astra-cli >/dev/null 2>&1; then \
+	  cli="$$(command -v astra-cli)"; \
+	fi; \
+	if [ -n "$$cli" ]; then \
+	  printf '\033[32mOK\033[0m  %s\n' "$$cli"; \
+	else \
+	  hard=$$((hard+1)); \
+	  printf '\033[31m失败\033[0m  ASTRA_CLI_BIN / <dataDir>/bin/astra-cli / PATH 均未找到可执行文件；make build 产出 bin/astra-cli，服务会拷到 <dataDir>/bin/\n'; \
+	fi; \
+	if [ -z "$$tok" ]; then \
+	  printf '%-20s ' '控制面存活'; \
+	  ready=$$(curl -s --noproxy '*' -m 3 -o /dev/null -w '%{http_code}' "$$srv/readyz" 2>/dev/null || true); \
+	  [ -z "$$ready" ] && ready=000; \
+	  if [ "$$ready" = "200" ]; then \
+	    printf '\033[32mOK\033[0m  /readyz 200；未设 ASTRA_TOKEN，能力接口未验证\n'; \
+	  else \
+	    if [ -n "$$STRICT" ]; then hard=$$((hard+1)); tag='失败'; col='31'; \
+	    else soft=$$((soft+1)); tag='警告'; col='33'; fi; \
+	    printf "\033[$${col}m$$tag\033[0m  /readyz HTTP %s（控制面未起或不可达；能力接口因无 token 未验证）\n" "$$ready"; \
+	  fi; \
+	else \
+	  probe() { curl -s --noproxy '*' -m 3 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $$tok" "$$srv$$1" 2>/dev/null || true; }; \
+	  for ep in /v1/capabilities /v1/skills; do \
+	    printf '%-20s ' "$$ep"; \
+	    code=$$(probe "$$ep"); \
+	    [ -z "$$code" ] && code=000; \
+	    if [ "$$code" = "200" ]; then \
+	      printf '\033[32mOK\033[0m  HTTP 200\n'; \
+	    else \
+	      if [ -n "$$STRICT" ]; then hard=$$((hard+1)); tag='失败'; col='31'; \
+	      else soft=$$((soft+1)); tag='警告'; col='33'; fi; \
+	      printf "\033[$${col}m$$tag\033[0m  HTTP %s（控制面未起或注册表未启用，看 /v1/meta）\n" "$$code"; \
+	    fi; \
+	  done; \
+	fi; \
+	printf '\n'; \
+	if [ "$$hard" -gt 0 ]; then \
+	  printf '\033[31m%d 项硬性前提未就绪，闭环会假跑（exit 1）\033[0m' "$$hard"; \
+	  if [ "$$soft" -gt 0 ]; then printf '，另有 %d 项可选警告' "$$soft"; fi; \
+	  printf '\n'; \
+	  exit 1; \
+	fi; \
+	if [ "$$soft" -gt 0 ]; then \
+	  printf '\033[33m硬性前提全部就绪；%d 项控制面未就绪（可选警告，STRICT=1 下判失败）\033[0m\n' "$$soft"; \
+	else \
+	  printf '\033[32m全部前提就绪\033[0m\n'; \
+	fi; \
 	exit 0

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -35,9 +36,10 @@ const skillsHelp = `用法：
   astra-cli skills show <名称> [--from DIR]                    打印 SKILL.md
   astra-cli skills check [--from DIR]                          校验 requires，存在不可用项退出码 1
   astra-cli skills install <名称> [--dest DIR] [--from DIR] [--force]
-                                                              安装到 ~/.astra/skills/<名称>
+                                                              安装到 SKILL_DIR/<名称>（未设则 ~/.astra/skills/<名称>）
 
 默认目录：SKILL_DIR 环境变量 > ~/.astra/skills > 仓库 skills/（向上 8 层）
+安装目标跟随 SKILL_DIR；名称只允许小写字母/数字、连字符分隔。
 astra-cli 校验：ASTRA_CLI_BIN 指向可执行文件，或在 PATH 里能 LookPath 到 astra-cli
 `
 
@@ -128,7 +130,10 @@ func (a *app) skillsShow(args []string) int {
 }
 
 // skillsCheck 校验每个 skill 的 requires，列出不可用项。
-// 退出码：0 全部可用；1 存在不可用项；2 用法/读目录错误。
+// 退出码：0 无硬性失败（能力开关无本地信息只警告）；1 存在硬性失败（astra-cli 找不到）；2 用法/读目录错误。
+//
+// 以前对任何非 astra-cli 的 requires 一律标「未启用」，于是只要 skill 声明了
+// 能力开关，check 必然退出 1——那是 CLI 拿不到开关状态，不是 skill 真的不可用。
 func (a *app) skillsCheck(args []string) int {
 	fs := a.newFlagSet("skills check")
 	from := fs.String("from", "", "skills 根目录")
@@ -144,10 +149,17 @@ func (a *app) skillsCheck(args []string) int {
 	if err != nil {
 		return a.fail(err)
 	}
-	var bad []skillMeta
+	var bad, warn []skillMeta
 	for _, m := range metas {
-		if m.Unavailable != "" {
+		if m.Unavailable == "" {
+			continue
+		}
+		// 只有 astra-cli 真的找不到才是硬性失败；其余 requires 是服务端能力开关，
+		// 本地拿不到开关状态，只打印警告、不算失败。
+		if hardUnavailable(m) {
 			bad = append(bad, m)
+		} else {
+			warn = append(warn, m)
 		}
 	}
 
@@ -155,19 +167,25 @@ func (a *app) skillsCheck(args []string) int {
 		Root        string      `json:"root"`
 		Checked     int         `json:"checked"`
 		Unavailable []skillMeta `json:"unavailable"`
+		Warnings    []skillMeta `json:"warnings,omitempty"`
 	}
-	res := result{Root: root, Checked: len(metas), Unavailable: bad}
+	res := result{Root: root, Checked: len(metas), Unavailable: bad, Warnings: warn}
 	if a.g.json {
 		if err := clikit.PrintJSON(a.out, res); err != nil {
 			return a.fail(err)
 		}
 	} else {
-		if len(bad) == 0 {
+		if len(bad) == 0 && len(warn) == 0 {
 			fmt.Fprintf(a.out, "全部 %d 个 skill 的 requires 均满足。\n", len(metas))
 		} else {
-			fmt.Fprintf(a.out, "检查了 %d 个 skill，其中 %d 个不可用：\n", len(metas), len(bad))
-			for _, m := range bad {
-				fmt.Fprintf(a.out, "  - %s：%s\n", m.Name, m.Unavailable)
+			if len(bad) > 0 {
+				fmt.Fprintf(a.out, "检查了 %d 个 skill，其中 %d 个不可用：\n", len(metas), len(bad))
+				for _, m := range bad {
+					fmt.Fprintf(a.out, "  - %s：%s\n", m.Name, m.Unavailable)
+				}
+			}
+			for _, m := range warn {
+				fmt.Fprintf(a.out, "  警告：%s 的能力开关无法在本地确认（%s），不计为失败；请用服务端 /v1/skills 复核\n", m.Name, m.Unavailable)
 			}
 		}
 		fmt.Fprintf(a.out, "目录：%s\n", root)
@@ -178,10 +196,63 @@ func (a *app) skillsCheck(args []string) int {
 	return 0
 }
 
+// skillNameRe 与后端 skillhub 的 name 规则一致：小写字母/数字，用单个连字符分隔。
+// name 会进 filepath.Join 拼安装目标，必须先收紧字符集，杜绝 ../ 与绝对路径。
+var skillNameRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// maxSkillFileBytes 是安装时允许的 SKILL.md 最大字节数。os.CopyFS 会递归复制
+// 整个源目录，先用这道闸门挡住异常大的来源，避免把一堆无关文件塞进 SKILL_DIR。
+const maxSkillFileBytes = 256 << 10 // 256KB
+
+// validateSkillName 校验安装用的 name。非法（含 ../、绝对路径、空）直接 UseError。
+func validateSkillName(name string) error {
+	if !skillNameRe.MatchString(name) {
+		return &client.UseError{Msg: fmt.Sprintf("非法 skill 名称 %q：只允许小写字母/数字、以连字符分隔（如 astra-run）", name)}
+	}
+	return nil
+}
+
+// joinInBase 把 name 拼到 base 下，并用 filepath.Rel 复核结果没有越出 base。
+// name 一般已过 skillNameRe，这里再做一层纵深防御：哪怕上游漏校验或将来改了
+// 规则，../ 与绝对路径也进不了安装目标。
+func joinInBase(base, name string) (string, error) {
+	target := filepath.Join(base, name)
+	rel, err := filepath.Rel(base, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", &client.UseError{Msg: fmt.Sprintf("目标路径越出目录：名称 %q，根目录 %q", name, base)}
+	}
+	return target, nil
+}
+
+// skillsDestBase 返回安装的默认目标根目录。与 findSkillsRoot 一致地优先
+// SKILL_DIR，但**不**回退到仓库 skills/（那是随发行版内置的只读来源，
+// 不该被 install 写入）。SKILL_DIR 未设时退回 ~/.astra/skills。
+func skillsDestBase() (string, error) {
+	if p := strings.TrimSpace(os.Getenv("SKILL_DIR")); p != "" {
+		return clikit.ExpandHome(p), nil
+	}
+	return clikit.Path("skills")
+}
+
+// validateSkillSource 校验待复制的源目录：必须有普通文件 SKILL.md 且 <= 256KB。
+func validateSkillSource(src string) error {
+	info, err := os.Stat(filepath.Join(src, "SKILL.md"))
+	if err != nil {
+		return &client.UseError{Msg: fmt.Sprintf("源 %s 里没有 SKILL.md：%v", src, err)}
+	}
+	if info.IsDir() {
+		return &client.UseError{Msg: fmt.Sprintf("源 %s 的 SKILL.md 是目录，不是文件", src)}
+	}
+	if info.Size() > maxSkillFileBytes {
+		return &client.UseError{Msg: fmt.Sprintf("源 SKILL.md 超过 256KB 上限（%s），拒绝安装", clikit.HumanSize(info.Size()))}
+	}
+	return nil
+}
+
 func (a *app) skillsInstall(args []string) int {
 	fs := a.newFlagSet("skills install")
 	from := fs.String("from", "", "skills 根目录或某个 skill 目录")
-	dest := fs.String("dest", "", "目标目录（默认 ~/.astra/skills/<名称>）")
+	dest := fs.String("dest", "", "目标目录（默认 SKILL_DIR/<名称>，未设则 ~/.astra/skills/<名称>）")
 	force := fs.Bool("force", false, "目标已存在时覆盖")
 	pos, code, done := a.parse(fs, args, clikit.BoolFlags("server", "token", "from", "dest"))
 	if done {
@@ -191,18 +262,28 @@ func (a *app) skillsInstall(args []string) int {
 		return a.fail(err)
 	}
 	name := pos[0]
+	if err := validateSkillName(name); err != nil {
+		return a.fail(err)
+	}
 	src, err := resolveSkillDir(*from, name)
 	if err != nil {
+		return a.fail(err)
+	}
+	if err := validateSkillSource(src); err != nil {
 		return a.fail(err)
 	}
 
 	dst := clikit.ExpandHome(*dest)
 	if dst == "" {
-		base, err := clikit.Path("skills")
-		if err != nil {
-			return a.fail(err)
+		base, e := skillsDestBase()
+		if e != nil {
+			return a.fail(e)
 		}
-		dst = filepath.Join(base, name)
+		d, e := joinInBase(base, name)
+		if e != nil {
+			return a.fail(e)
+		}
+		dst = d
 	}
 	if _, err := os.Stat(dst); err == nil {
 		if !*force {
@@ -299,7 +380,10 @@ func resolveSkillDir(from, name string) (string, error) {
 		if _, err := os.Stat(filepath.Join(p, "SKILL.md")); err == nil {
 			return p, nil
 		}
-		cand := filepath.Join(p, name)
+		cand, err := joinInBase(p, name)
+		if err != nil {
+			return "", err
+		}
 		if _, err := os.Stat(filepath.Join(cand, "SKILL.md")); err != nil {
 			return "", &client.UseError{Msg: fmt.Sprintf("%s 里没有 skill %q", p, name)}
 		}
@@ -309,7 +393,10 @@ func resolveSkillDir(from, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cand := filepath.Join(root, name)
+	cand, err := joinInBase(root, name)
+	if err != nil {
+		return "", err
+	}
 	if _, err := os.Stat(filepath.Join(cand, "SKILL.md")); err != nil {
 		var names []string
 		if metas, e := readSkills(root); e == nil {
@@ -411,6 +498,8 @@ func trimQuotes(s string) string {
 // astra-cli 用 ASTRA_CLI_BIN / exec.LookPath 在本机确认；其余 requires 是
 // 服务端 /v1/meta 的能力开关名，CLI 本地拿不到开关状态，保守地标为不可用
 // 并写清原因——宁可让运营看见一条待确认，也不要假装能用。
+// 注意：这里给 skills list 的 UNAVAILABLE 列用；skills check 的失败判定
+// 不直接吃这个结果，而是用 hardUnavailable 区分「硬性失败」与「仅警告」。
 func cliAvailability(requires []string) string {
 	for _, r := range requires {
 		r = strings.TrimSpace(r)
@@ -426,6 +515,19 @@ func cliAvailability(requires []string) string {
 		return fmt.Sprintf("能力 %s 未启用（CLI 无开关信息，请用服务端 /v1/skills 复核）", r)
 	}
 	return ""
+}
+
+// hardUnavailable 判断该 skill 是否因「本地可确证的必需项」而不可用。
+// 目前只有 astra-cli 能在本地确证（ASTRA_CLI_BIN / LookPath）；其余 requires
+// 是服务端能力开关名，CLI 拿不到开关状态，不能据此判失败，否则只要 skill
+// 声明了能力开关，skills check 就恒定退出 1。
+func hardUnavailable(m skillMeta) bool {
+	for _, r := range m.Requires {
+		if strings.TrimSpace(r) == "astra-cli" && !astraCLIExecutable() {
+			return true
+		}
+	}
+	return false
 }
 
 func astraCLIExecutable() bool {

@@ -24,6 +24,9 @@ type Diagnosis struct {
 	Blocked    int       `json:"blocked"`
 	Failed     int       `json:"failed"`
 	CreatedAt  time.Time `json:"createdAt"`
+	// ConsumedAt 非空表示这条诊断已被回灌进某轮 prompt，之后不再注入。
+	// 指针 + omitempty：未消费的记录落盘时不带这个字段，兼容旧 insights.json。
+	ConsumedAt *time.Time `json:"consumedAt,omitempty"`
 }
 
 type Summary struct {
@@ -40,6 +43,13 @@ type Store interface {
 	Recent(ctx context.Context, sessionID string, limit int) ([]Diagnosis, error)
 	All(ctx context.Context, limit int) ([]Diagnosis, error)
 	ForRun(ctx context.Context, runID string) (Diagnosis, error)
+	// Pending 只返回未被消费、且 CreatedAt 晚于 since 的诊断（CreatedAt 倒序）。
+	// 回灌用它筛「最近一次成功 run 之后仍未消费」的诊断，避免历史诊断
+	// 在之后每一轮被重复注入。
+	Pending(ctx context.Context, sessionID string, since time.Time, limit int) ([]Diagnosis, error)
+	// MarkConsumed 按 runID 把诊断标记为已消费并落盘。幂等：找不到或已消费
+	// 都返回 nil，不报错。
+	MarkConsumed(ctx context.Context, runID string) error
 }
 
 func Open(dataDir string) (Store, error) { return openImpl(dataDir) }

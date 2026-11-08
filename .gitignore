@@ -99,6 +99,10 @@ tmp/
 *.log
 !deploy/**/*.log
 
+# 每日 09:00 自闭环自动化产出的审查报告：自动化 prompt 约定写到 docs/，
+# 属于运行产物，不入库，也别被第二天的审查当成代码回归。
+docs/iteration-review-*.md
+
 # 依赖组件（Milvus / Langfuse）的数据目录。
 # docker compose 用 ./data/<service> 绑定挂载，里面是 etcd 的 db 文件、
 # clickhouse 的 part、pg 的 WAL 与登录账号哈希——体积大且绝不能进 git。

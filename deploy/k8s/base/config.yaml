@@ -4,11 +4,14 @@
 # 真值由 kubectl create secret / External Secrets 注入，不入 git。
 #
 # 关于 env 名的说明（重要）：
-#   astra-server 是纯 flag 程序（cmd/astra-server/main.go 用标准库 flag 解析），
-#   **不读任何 ASTRA_* 环境变量**。下面几个键之所以同时以 ASTRA_ 形式出现在
-#   Deployment 的 env 里，是为了能写 args: ["-store=$(ASTRA_STORE)"] —— k8s 会先用
-#   容器 env 做 $(VAR) 替换，再把结果当命令行参数传给进程。也就是说 env 只是
-#   「参数传递的载体」，程序本身并不解析它；改配置只改这里，不用动 Deployment。
+#   astra-server 用标准库 flag 解析启动参数。下面几个键之所以同时以 ASTRA_ 形式
+#   出现在 Deployment 的 env 里，是为了能写 args: ["-store=$(ASTRA_STORE)"] ——
+#   k8s 会先用容器 env 做 $(VAR) 替换，再把结果当命令行参数传给进程。也就是说
+#   这几个 env 只是「参数传递的载体」，程序并不按变量名解析它们；改配置只改这里。
+#   另有一类「可选能力」环境变量由程序 os.Getenv **直接读取**
+#   （LANGFUSE_* / MILVUS_* / DISTILL_AUTO / INSIGHT_REPLAY / SKILL_DIR /
+#   ASTRA_CLI_BIN 等），它们不是 $(VAR) 载体，也不放本 ConfigMap，
+#   见 astra-api.yaml 的「可选能力」env 块。
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -17,8 +20,8 @@ metadata:
   namespace: astra-system
 data:
   # ── 存储 ────────────────────────────────────────────────────
-  # 一期用 PG（多副本共享、支持租户与计费）。可选 sqlite / file，
-  # 但那两种撑不起 api 的 3 副本，只能用于单机排障。
+  # 一期用 PG（唯一支持跨进程的实现，也支持租户与计费）。可选 sqlite / file，
+  # 但那两种是单机文件、撑不起共享，只能用于单机排障（api 当前固定 1 副本）。
   # 注意：DSN 含密码，不放这里，见 secret.example.yaml 的 astra-db。
   store: "postgres"
 

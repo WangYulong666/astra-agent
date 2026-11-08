@@ -217,7 +217,9 @@ func (a *attacher) diagnose(runID string, p statePayload) {
 		}
 	}
 
-	d.Suggestion = suggest(d.Error)
+	// suggest 的兜底文案带 {id} 占位符（"查看 /v1/runs/{id}/activity..."），
+	// 落库前替换成真实 runID，否则用户拿到的是一条谁也点不开的假路径。
+	d.Suggestion = strings.ReplaceAll(suggest(d.Error), "{id}", runID)
 
 	if a.ins != nil {
 		if err := a.ins.append(d); err != nil {

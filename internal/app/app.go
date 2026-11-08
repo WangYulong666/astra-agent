@@ -21,6 +21,7 @@ import (
 
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -398,12 +399,16 @@ func New(cfg Config) (*Server, error) {
 	for k, v := range info {
 		switches[k] = v == "on"
 	}
-	cliBin := resolveCLIBin(cfg, lg)
+	// 只算一次：openSkillHub（requires 判定）与 hints（注入沙箱的
+	// ASTRA_CLI_BIN）必须拿到同一个 CLIBin 值，不能各查一次导致漂移。
+	cliBin := ensureCLIBin(cfg, lg)
 	skillHub := openSkillHub(lg, cfg, s.hub, switches, cliBin)
 	caps := openCapabilityRegistry(lg, skillHub, switches)
 	insights, stopInsight := openInsights(lg, st, ledger, s.hub, cfg)
 	s.stopInsight = stopInsight
-	hints.Set(insights, "http://"+cfg.Addr, cliBin)
+	// Start 之前控制面还没监听：url 置空，CreateSession 就不会注入一个
+	// 连不上的 ASTRA_SERVER。真正地址由 Start 用 normalizeLoopback 回填。
+	hints.Set(insights, "", cliBin)
 	info["capabilities"] = boolLabel(caps != nil)
 	info["skills"] = boolLabel(skillHub != nil)
 	info["insights"] = boolLabel(insights != nil)
@@ -449,10 +454,11 @@ func (s *Server) Start() (string, error) {
 		return "", err
 	}
 	s.ln = ln
-	// cfg.Addr 可能是 :0（内核分配端口），到 Start 才知道真实地址。
-	// 沙箱里的 ASTRA_SERVER 必须用这个，否则 astra-cli 连不上。
+	// cfg.Addr 可能是 :0（内核分配端口），到 Start 才知道真实地址；
+	// ln.Addr() 又可能是 "[::]:port" / "0.0.0.0:port" 这类通配地址，
+	// 沙箱拿去连必然失败。统一成回环地址，ASTRA_CLI 才连得上控制面。
 	if s.hints != nil {
-		s.hints.SetURL("http://" + ln.Addr().String())
+		s.hints.SetURL(normalizeLoopback(ln.Addr(), "http://"+s.cfg.Addr))
 	}
 	go func() {
 		if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -461,6 +467,31 @@ func (s *Server) Start() (string, error) {
 	}()
 	s.lg.Printf("控制面就绪 http://%s  provider=%s data=%s", ln.Addr(), s.prov.Name(), s.cfg.DataDir)
 	return ln.Addr().String(), nil
+}
+
+// normalizeLoopback 把监听地址统一成沙箱可直连的回环 URL。
+//
+// net.Listener.Addr() 在监听 :0 / 0.0.0.0 / [::] 时会返回 "[::]:port" 或
+// "0.0.0.0:port" 这类通配地址；控制面与沙箱始终在同一台机器，锁定
+// 127.0.0.1 + 真实 TCP 端口即可。取不到端口（非 TCP / 端口 0 / nil）时退回
+// fallback，由调用方决定如何降级。
+func normalizeLoopback(addr net.Addr, fallback string) string {
+	if addr == nil {
+		return fallback
+	}
+	port := ""
+	switch a := addr.(type) {
+	case *net.TCPAddr:
+		port = strconv.Itoa(a.Port)
+	default:
+		if _, p, err := net.SplitHostPort(addr.String()); err == nil {
+			port = p
+		}
+	}
+	if port == "" || port == "0" {
+		return fallback
+	}
+	return "http://127.0.0.1:" + port
 }
 
 // Err 返回 serve 期错误通道。Start 之后读；收到非 nil 错误说明服务已停。

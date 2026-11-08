@@ -273,13 +273,15 @@ func (a *app) printMainHelp() {
   sandbox list                                               运行中的沙箱
   sandbox kill <沙箱ID> [--yes]                               强杀沙箱（危险）
   audit tail [--follow] [--limit 50] [--action X]            审计日志（管理接口调用）
-  logs --help                                                七类执行/出网/用量日志查询
+  logs --help                                                执行/出网/用量/诊断日志查询
   logs egress [--limit 100] [--tenant ID]                    出网审计
   logs history <runID> [--after N]                           run 完整事件历史
   logs activity <runID> [--limit 200]                        行动账本（做了什么/卡在哪）
   logs children <runID>                                     子 agent 派生记录
-  logs usage [--from T] [--to T]                             用量流水
+  logs approvals <runID>                                    待决/已决的人工审批
+  logs usage [--from T] [--to T] [--limit N] [--user ID]    用量流水
   logs billing                                              本月账单
+  logs insights [--limit N] [--session ID]                  失败 run 的结构化诊断与建议
   obs status                                                 观测能力状态与所需变量
   obs traces [--run RUN_ID] [--limit 20]                     trace 反查
   memory stats [--tenant ID]                                 记忆只读统计（不含内容）

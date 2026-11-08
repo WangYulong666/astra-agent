@@ -250,8 +250,11 @@ func (m *Manager) CreateSession(ctx context.Context, opts CreateSessionOptions) 
 	// 注意必须按会话生成，若把同一个 sandboxID 塞进共享的 cfg.Agent.Env，
 	// 所有会话的流量会挤在一个归属下，审计就失去意义。
 	if m.cfg.Egress != nil && m.cfg.Egress.Enabled() {
+		// NO_PROXY 必须无条件放行控制面：egress 代理默认拦私网，否则沙箱里的
+		// astra-cli 访问 ASTRA_SERVER 会被 403。这与 NetworkLock 解耦——网络锁
+		// 只影响下面 Seatbelt 的 ExtraAllow，不该决定 NO_PROXY 里有没有控制面。
 		spec.Env = mergeEnv(spec.Env, egress.EnvForWithBypass(
-			m.cfg.Egress.Addr(), id, newNonce(), m.cfg.EgressBypass))
+			m.cfg.Egress.Addr(), id, newNonce(), m.egressBypassValue()))
 
 		// 双层出网边界：代理管「哪些域名能出去」，Seatbelt 管「只能连代理」。
 		// EGRESS_NO_PROXY 里的本机地址也要放行，否则 LLM 网关会被一起挡掉。
@@ -506,17 +509,12 @@ func (m *Manager) StartRunWithParent(ctx context.Context, sessionID, input, pare
 		}
 	}
 
-	// 失败诊断回灌：把同会话最近一条诊断作为明确的上下文前缀，
-	// 不改写用户输入的语义，也不自动重试/改参数（研究里自动改代码已有作弊风险）。
-	if m.cfg.InsightReplay && m.cfg.Hints != nil {
-		if ins, _, _ := m.cfg.Hints.Snapshot(); ins != nil {
-			if ds, err := ins.Recent(ctx, sessionID, 1); err == nil && len(ds) > 0 {
-				d := ds[0]
-				input = "[上轮失败上下文] " + d.Error + "；建议：" + d.Suggestion +
-					"\n\n[本轮指令]\n" + input
-			}
-		}
-	}
+	// 失败诊断回灌：只把「最近一次成功 run 之后仍未消费」的一条诊断作为
+	// 明确的上下文前缀，注入后即标记消费——不改写用户输入的语义，也不自动
+	// 重试/改参数（研究里自动改代码已有作弊风险）。旧实现直接 Recent(...,1)，
+	// 同一条历史诊断会在之后每一次 run 重复注入，连用户已成功也照注入。
+	// 放在写标题之后：标题要用用户原始输入，不能被回灌前缀污染。
+	input = m.replayContext(ctx, sess, input)
 
 	run := store.Run{
 		ID:          newID(),
@@ -541,6 +539,69 @@ func (m *Manager) StartRunWithParent(ctx context.Context, sessionID, input, pare
 		m.execute(run)
 	}()
 	return run, nil
+}
+
+// replayContext 把「最近一次成功 run 之后仍未消费」的一条失败诊断作为前缀回灌。
+//
+// 两道闸门保证不重复、不打扰已成功的用户：
+//  1. since = 最近一个成功 run 的结束时间（没有成功记录则用会话创建时间），
+//     Pending 只返回晚于 since 且未消费的诊断——用户成功后旧失败即失效。
+//  2. 命中后立刻 MarkConsumed，同一条诊断不会在第二轮再被注入。
+//
+// 任何一步失败都只记日志、不阻断 run（回灌是旁路增强项）。
+// INSIGHT_REPLAY 关闭时原样返回，保持既有可关语义。
+func (m *Manager) replayContext(ctx context.Context, sess store.Session, input string) string {
+	if !m.cfg.InsightReplay || m.cfg.Hints == nil {
+		return input
+	}
+	ins, _, _ := m.cfg.Hints.Snapshot()
+	if ins == nil {
+		return input
+	}
+	since := m.lastSuccessTime(ctx, sess)
+	ds, err := ins.Pending(ctx, sess.ID, since, 1)
+	if err != nil {
+		m.log.Printf("读取失败诊断失败（忽略，不影响本轮）: %v", err)
+		return input
+	}
+	if len(ds) == 0 {
+		return input
+	}
+	d := ds[0]
+	if err := ins.MarkConsumed(ctx, d.RunID); err != nil {
+		// 标记失败只记日志：本轮仍注入；最坏情况是下一轮再注入一次，
+		// 不值得为此阻断 run（诊断存储是文件，落盘失败属极端情况）。
+		m.log.Printf("标记诊断 %s 已消费失败（忽略）: %v", d.RunID, err)
+	}
+	return "[上轮失败上下文] " + d.Error + "；建议：" + d.Suggestion +
+		"\n\n[本轮指令]\n" + input
+}
+
+// lastSuccessTime 返回会话最近一个成功 run 的结束时间；没有成功记录时返回
+// 会话创建时间。两者都拿不到时返回零值（此时 Pending 会放行全部未消费诊断）。
+func (m *Manager) lastSuccessTime(ctx context.Context, sess store.Session) time.Time {
+	runs, err := m.cfg.Store.ListRuns(ctx, sess.ID)
+	if err != nil {
+		m.log.Printf("读取会话 %s 历史 run 失败（回灌退化为会话创建时间）: %v", sess.ID, err)
+		return sess.CreatedAt
+	}
+	var last time.Time
+	for _, r := range runs {
+		if r.Status != store.RunCompleted {
+			continue
+		}
+		t := r.EndedAt
+		if t.IsZero() {
+			t = r.CreatedAt
+		}
+		if t.After(last) {
+			last = t
+		}
+	}
+	if last.IsZero() {
+		return sess.CreatedAt
+	}
+	return last
 }
 
 // Cancel 请求 agent 停止当前任务。真正的终态要等 prompt 返回 cancelled，
@@ -1240,4 +1301,40 @@ func hostPortOf(raw string) string {
 		return ""
 	}
 	return u.Host
+}
+
+// egressBypassValue 生成注入沙箱的 NO_PROXY：保留 EgressBypass 原有内容
+// （LLM 网关），并把控制面 host:port「无条件」并进去后去重。
+//
+// 与 NetworkLock 解耦：只要 egress 代理开着，默认就会拦私网，沙箱里的
+// astra-cli 访问 ASTRA_SERVER 必须走例外；网络锁是否开启只影响 Seatbelt 的
+// ExtraAllow，不该决定 NO_PROXY 里有没有控制面。Start 之前 url 为空，
+// hostPortOf 返回空串，此时不放行（本来也还没有可连的控制面）。
+func (m *Manager) egressBypassValue() string {
+	cp := ""
+	if m.cfg.Hints != nil {
+		_, u, _ := m.cfg.Hints.Snapshot()
+		cp = hostPortOf(u)
+	}
+	return mergeBypass(m.cfg.EgressBypass, cp)
+}
+
+// mergeBypass 合并 NO_PROXY 条目：按逗号切分、去空白、保序去重，extra 非空且
+// 尚未出现时追加。逗号分隔，空值不产生多余逗号。
+func mergeBypass(existing, extra string) string {
+	seen := make(map[string]bool)
+	var out []string
+	add := func(part string) {
+		part = strings.TrimSpace(part)
+		if part == "" || seen[part] {
+			return
+		}
+		seen[part] = true
+		out = append(out, part)
+	}
+	for _, part := range strings.Split(existing, ",") {
+		add(part)
+	}
+	add(extra)
+	return strings.Join(out, ",")
 }

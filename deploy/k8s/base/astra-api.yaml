@@ -1,12 +1,23 @@
-# astra-api：HTTP/SSE 入口、鉴权、聚合查询（无状态，可随意扩缩）
+# astra-api：HTTP/SSE 入口、鉴权、聚合查询
 #
+# 副本数固定 1，不能扩缩。控制面有好几份单机文件 + 进程内单例，多副本各写各的、
+# 请求被随便路由到哪个副本都不一致（设计文档 §7 明确不做多副本共享，PG 化另排）：
+#   - <dataDir>/insights.json   失败诊断（insight 落盘，原子写、上限 500 条）
+#   - SKILL_DIR/index.json      技能索引（accept/reject/新建都刷新）
+#   - SKILL_DIR/drafts.json     沉淀草稿
+#   - SKILL_DIR/               技能正文目录（静态 + 动态 skill）
+#   以及审批注册表（internal/runner/approval.go 的 sync.Map）等进程内状态。
+# 所以这是「单副本 + 本地文件」的形态，不是无状态服务。要 HA 先把这些状态搬走。
 # 前端 SPA 用 Go embed 打进同一个二进制，不单独起 nginx ——
 # 省一个 Deployment、一个 Service，也省掉「静态资源版本和 API 版本对不上」这类问题。
 #
 # ── 三个必须知道的实际情况（都核对过 cmd/astra-server/main.go）──
-# 1) 程序只认 flag，不认同名环境变量。所以配置全部走 args，env 只作为
-#    $(VAR) 替换的载体（见 config.yaml 顶部说明）。写 ASTRA_XXX 环境变量
-#    然后指望程序自己读，是无效的。
+# 1) 启动参数只认 flag，不认同名环境变量：args 里的 -xxx 才是真配置，
+#    ASTRA_* 那几个 env 只是 $(VAR) 替换的载体（见 config.yaml 顶部说明），
+#    写 ASTRA_XXX 然后指望程序自己读是无效的。
+#    **但可选能力是另一类**：LANGFUSE_* / MILVUS_* / DISTILL_AUTO /
+#    INSIGHT_REPLAY / SKILL_DIR / ASTRA_CLI_BIN 等由程序 os.Getenv 直读，
+#    见下面 env 的「可选能力」块——那部分 env 是真配置，不是 $(VAR) 载体。
 # 2) /healthz、/readyz、/metrics 和业务 API **共用一个监听端口**（-addr）。
 #    代码里没有第二个监听器，所以这里不再声明 9090「metrics 端口」——
 #    那个端口以前就是个摆设，探针打上去必然失败。
@@ -19,7 +30,7 @@ metadata:
   namespace: astra-system
   labels: { app: astra-api }
 spec:
-  replicas: 3
+  replicas: 1                 # 见文件头：单机文件 + 进程内单例，扩到 >1 会各写各的
   selector:
     matchLabels: { app: astra-api }
   strategy:
@@ -81,7 +92,8 @@ spec:
           ports:
             - { name: http, containerPort: 8080 }
           env:
-            # ── 下面这些 env 全是 args 替换用的载体，程序本身不读 ──
+            # ── 下面这些 env 仅作 args 的 $(VAR) 载体（程序不解析它们）──
+            # 可选能力是另一类：程序用 os.Getenv 真读，见本 env 末尾的「可选能力」块。
             - name: ASTRA_STORE
               valueFrom: { configMapKeyRef: { name: astra-config, key: store } }
             - name: ASTRA_LLM_GATEWAY
@@ -99,6 +111,27 @@ spec:
               valueFrom: { secretKeyRef: { name: astra-auth, key: jwt-secret } }
             - name: ASTRA_LLM_KEY
               valueFrom: { secretKeyRef: { name: astra-llm, key: api-key } }
+            # ── 可选能力：程序用 os.Getenv 真正读取的环境变量 ──
+            # 与上面的 $(VAR) 载体不同，这里的键名就是代码里 os.Getenv 的名字，
+            # 改这里（或用 kustomize overlay 覆盖）才生效，不是启动参数。
+            # 留空 = 关闭 / 用代码默认值；要开启就填值。生产环境建议把密钥类
+            # 换成 valueFrom.secretKeyRef / ESO 注入，别把真值写进清单。
+            - name: LANGFUSE_HOST
+              value: ""                     # 观测；填集群内 Langfuse 地址开启，留空=关
+            - name: LANGFUSE_PUBLIC_KEY
+              value: ""                     # 随 LANGFUSE_HOST 一起填（首启自动建的那对 key）
+            - name: LANGFUSE_SECRET_KEY
+              value: ""                     # 观测密钥；生产用 secretKeyRef，勿写明文
+            - name: MILVUS_ADDR
+              value: ""                     # 长期记忆；填 Milvus 地址开启，留空=关
+            - name: SKILL_DIR
+              value: "/data/skills"         # 技能正文/索引/草稿（单机文件，见 replicas=1 说明）
+            - name: DISTILL_AUTO
+              value: "true"                 # 成功 run 自动沉淀 skill 草稿；false/0/no/off 关
+            - name: INSIGHT_REPLAY
+              value: "true"                 # 失败诊断回灌下一轮 prompt；false 关
+            - name: ASTRA_CLI_BIN
+              value: ""                     # 留空=自动定位 <dataDir>/bin/astra-cli
           # 存活探针只看进程活着没：/healthz 永远 200，卡死也返回 200 是它的定义
           livenessProbe:
             httpGet: { path: /healthz, port: http }
@@ -149,6 +182,9 @@ metadata:
   name: astra-api
   namespace: astra-system
 spec:
-  minAvailable: 2
+  # 必须跟着 replicas 走：单副本没有冗余，minAvailable 只能是 1。
+  # 代价是主动驱逐（kubectl drain）会被挡住——单副本本来就没有可让出的副本，
+  # 维护窗口请显式 --disable-eviction 或临时删掉本 PDB，别把副本数调回 3 来绕。
+  minAvailable: 1
   selector:
     matchLabels: { app: astra-api }

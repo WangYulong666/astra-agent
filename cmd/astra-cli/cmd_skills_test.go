@@ -313,3 +313,143 @@ func TestSkillsHelpMentionsCheck(t *testing.T) {
 		t.Fatalf("skillsHelp 没写 check / SKILL_DIR:\n%s", skillsHelp)
 	}
 }
+
+// 能力开关（无本地开关信息）只能警告，不能让 skills check 假失败退出 1。
+func TestSkillsCheckSwitchRequiresWarnsOnly(t *testing.T) {
+	root := makeSkillsRoot(t, map[string]string{
+		"needs-switch": skillBody("needs-switch", "需要开关", "vision"),
+		"plain":        skillBody("plain", "无依赖", ""),
+	})
+	cleanHome(t)
+	noCLI(t)
+	var out, errBuf bytes.Buffer
+	code := run([]string{"skills", "check", "--from", root}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("能力开关只应警告、不该退出 1；实际 %d（out=%s err=%s）", code, out.String(), errBuf.String())
+	}
+	if !strings.Contains(out.String(), "警告") || !strings.Contains(out.String(), "vision") {
+		t.Fatalf("没打印能力开关警告:\n%s", out.String())
+	}
+}
+
+// 主 help 必须列出 skills check（以前漏列）。
+func TestMainHelpMentionsSkillsCheck(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	run([]string{"--help"}, &out, &errBuf)
+	if !strings.Contains(out.String(), "skills check") {
+		t.Fatalf("主 help 没列出 skills check:\n%s", out.String())
+	}
+}
+
+// ── 6. install：名称校验 / 路径穿越 / 源校验 / 正常安装 ──────
+
+func TestValidateSkillName(t *testing.T) {
+	valid := []string{"astra-run", "a", "a1", "abc-123-def", "x-y-z"}
+	invalid := []string{"", "../escape", "/tmp/absolute", "a/b", "UPPER", "a_b", "a b", "-lead", "trail-", "a--b", ".."}
+	for _, n := range valid {
+		if err := validateSkillName(n); err != nil {
+			t.Errorf("合法名称 %q 被拒: %v", n, err)
+		}
+	}
+	for _, n := range invalid {
+		if err := validateSkillName(n); err == nil {
+			t.Errorf("非法名称 %q 没被拒", n)
+		}
+	}
+}
+
+func TestJoinInBaseRejectsTraversal(t *testing.T) {
+	base := t.TempDir()
+	if _, err := joinInBase(base, "ok-name"); err != nil {
+		t.Fatalf("合法拼接受阻: %v", err)
+	}
+	for _, bad := range []string{"../escape", "../../x", "a/../../b"} {
+		if _, err := joinInBase(base, bad); err == nil {
+			t.Errorf("joinInBase 没挡住 %q", bad)
+		}
+	}
+}
+
+func TestValidateSkillSource(t *testing.T) {
+	t.Run("没有 SKILL.md", func(t *testing.T) {
+		if err := validateSkillSource(t.TempDir()); err == nil {
+			t.Fatal("应拒绝无 SKILL.md 的源")
+		}
+	})
+	t.Run("SKILL.md 超限", func(t *testing.T) {
+		d := t.TempDir()
+		if err := os.WriteFile(filepath.Join(d, "SKILL.md"), []byte(strings.Repeat("x", maxSkillFileBytes+1)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateSkillSource(d); err == nil {
+			t.Fatal("应拒绝超 256KB 的 SKILL.md")
+		}
+	})
+	t.Run("正常", func(t *testing.T) {
+		d := t.TempDir()
+		if err := os.WriteFile(filepath.Join(d, "SKILL.md"), []byte("---\nname: demo\n---\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateSkillSource(d); err != nil {
+			t.Fatalf("正常源被拒: %v", err)
+		}
+	})
+}
+
+func TestSkillsInstallRejectsInvalidNames(t *testing.T) {
+	root := makeSkillsRoot(t, map[string]string{
+		"demo": skillBody("demo", "演示", ""),
+	})
+	for _, name := range []string{"../escape", "/tmp/astra-install-absolute", ""} {
+		t.Run(fmt.Sprintf("name=%q", name), func(t *testing.T) {
+			destParent := t.TempDir()
+			var out, errBuf bytes.Buffer
+			code := run([]string{"skills", "install", name, "--from", root, "--dest", filepath.Join(destParent, "dst")}, &out, &errBuf)
+			if code != 2 {
+				t.Fatalf("非法名称 %q 应返回用法错误 2，实际 %d（out=%s err=%s）", name, code, out.String(), errBuf.String())
+			}
+			// 一旦漏过校验，../escape 会写到目标外；确认没有逃逸文件。
+			if _, err := os.Stat(filepath.Join(destParent, "escape", "SKILL.md")); err == nil {
+				t.Fatal("发生路径穿越：在目标外创建了文件")
+			}
+		})
+	}
+}
+
+func TestSkillsInstallOK(t *testing.T) {
+	root := makeSkillsRoot(t, map[string]string{
+		"demo": skillBody("demo", "演示", ""),
+	})
+
+	t.Run("默认目标跟随 SKILL_DIR", func(t *testing.T) {
+		destBase := t.TempDir()
+		cleanHome(t)
+		t.Setenv("SKILL_DIR", destBase)
+		var out, errBuf bytes.Buffer
+		code := run([]string{"skills", "install", "demo", "--from", root}, &out, &errBuf)
+		if code != 0 {
+			t.Fatalf("exit = %d, stderr=%s", code, errBuf.String())
+		}
+		raw, err := os.ReadFile(filepath.Join(destBase, "demo", "SKILL.md"))
+		if err != nil {
+			t.Fatalf("没安装到 SKILL_DIR: %v", err)
+		}
+		if !strings.Contains(string(raw), "name: demo") {
+			t.Fatalf("安装内容不对: %q", string(raw))
+		}
+	})
+
+	t.Run("显式 --dest", func(t *testing.T) {
+		cleanHome(t)
+		t.Setenv("SKILL_DIR", "")
+		dest := filepath.Join(t.TempDir(), "custom")
+		var out, errBuf bytes.Buffer
+		code := run([]string{"skills", "install", "demo", "--from", root, "--dest", dest}, &out, &errBuf)
+		if code != 0 {
+			t.Fatalf("exit = %d, stderr=%s", code, errBuf.String())
+		}
+		if _, err := os.Stat(filepath.Join(dest, "SKILL.md")); err != nil {
+			t.Fatalf("--dest 没生效: %v", err)
+		}
+	})
+}

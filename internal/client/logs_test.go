@@ -164,3 +164,56 @@ func TestBilling(t *testing.T) {
 		t.Fatalf("解析不对: %+v", out)
 	}
 }
+
+func TestAdminInsights(t *testing.T) {
+	var p logProbe
+	srv := newLogServer(t, `{"items":[{"runId":"r1","sessionId":"s1","status":"failed","error":"exec: timeout","lastTool":"bash","suggestion":"缩短超时或拆分步骤","toolCount":3,"blocked":1,"failed":1,"createdAt":"2026-11-07T01:02:03Z"}],"limit":7}`, &p)
+	defer srv.Close()
+	items, err := New(srv.URL, "tok").AdminInsights(context.Background(), "s1", 7)
+	if err != nil {
+		t.Fatalf("AdminInsights: %v", err)
+	}
+	if p.path != "/v1/insights" || !strings.Contains(p.query, "limit=7") || !strings.Contains(p.query, "session_id=s1") {
+		t.Fatalf("请求不对: %s?%s", p.path, p.query)
+	}
+	if p.auth != "Bearer tok" {
+		t.Fatalf("缺 Bearer 头: %q", p.auth)
+	}
+	if len(items) != 1 {
+		t.Fatalf("解析条数不对: %+v", items)
+	}
+	got := items[0]
+	if got.RunID != "r1" || got.SessionID != "s1" || got.Status != "failed" ||
+		got.Error != "exec: timeout" || got.LastTool != "bash" || got.Suggestion != "缩短超时或拆分步骤" ||
+		got.ToolCount != 3 || got.Blocked != 1 || got.Failed != 1 {
+		t.Fatalf("字段解析不对: %+v", got)
+	}
+	if got.CreatedAt.IsZero() || got.CreatedAt.UTC().Format("2006-01-02T15:04:05Z") != "2026-11-07T01:02:03Z" {
+		t.Fatalf("createdAt 解析不对: %v", got.CreatedAt)
+	}
+}
+
+func TestAdminInsightsDefaultsAndClamp(t *testing.T) {
+	var p logProbe
+	srv := newLogServer(t, `{"items":null,"limit":50}`, &p)
+	defer srv.Close()
+	c := New(srv.URL, "tok")
+
+	items, err := c.AdminInsights(context.Background(), "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items == nil || len(items) != 0 {
+		t.Fatalf("空结果应是空切片，实际 %#v", items)
+	}
+	if !strings.Contains(p.query, "limit=50") || strings.Contains(p.query, "session_id") {
+		t.Fatalf("默认 limit=50 且不带 session_id: %s", p.query)
+	}
+
+	if _, err := c.AdminInsights(context.Background(), "", 9999); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(p.query, "limit=500") {
+		t.Fatalf("超过上限应 clamp 到 500: %s", p.query)
+	}
+}

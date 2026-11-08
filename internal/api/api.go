@@ -295,13 +295,12 @@ func (h *handler) authed(fn http.HandlerFunc, act auth.Action) http.HandlerFunc 
 
 		// 沙箱凭据走独立分支：白名单本身就是它的权限边界，不再过 RBAC。
 		// 放在 Authenticate 之前，因为 Authenticate 会拒绝 scope 非空的 token。
+		// trySandboxAuth 内部已做完「验签 → 会话存在性(吊销) → 白名单」三道检查，
+		// 这里不再重复判白名单：两处各持一套判据迟早会漂，而且 invalid 的原因
+		// 可能是「会话已删」或「端点不在白名单」，统一归到 401 更诚实。
 		if p, isSandbox, valid := h.trySandboxAuth(r); isSandbox {
 			if !valid {
-				fail(w, http.StatusUnauthorized, "沙箱凭据无效或已过期")
-				return
-			}
-			if !h.sandboxPathAllowed(r) {
-				fail(w, http.StatusForbidden, "沙箱凭据无权访问该端点")
+				fail(w, http.StatusUnauthorized, "沙箱凭据无效、已过期，或无权访问该端点")
 				return
 			}
 			fn(w, r.WithContext(auth.WithPrincipal(r.Context(), p)))

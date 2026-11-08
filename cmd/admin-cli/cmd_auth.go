@@ -17,7 +17,7 @@ func (a *app) cmdLogin(args []string) int {
 	password := fs.String("password", "", "密码")
 	tenant := fs.String("tenant", "default", "租户 slug")
 	as := fs.String("as", "admin", "写进配置的身份标记（不参与鉴权）")
-	_, code, done := a.parse(fs, args, clikit.BoolFlags("server", "token", "email", "password", "tenant", "as", "json"))
+	_, code, done := a.parse(fs, args, clikit.BoolFlags("server", "token", "email", "password", "tenant", "as"))
 	if done {
 		return code
 	}
@@ -118,7 +118,9 @@ func formatTime(t time.Time) string {
 	if t.IsZero() {
 		return "-"
 	}
-	return t.Local().Format("2006-01-02 15:04")
+	// 统一按 UTC 展示并标注时区：时间参数本就按 UTC 解析，若用 t.Local()
+	// 会被本地时区（如 UTC+8）平移 8 小时，造成与输入对不上。
+	return t.UTC().Format("2006-01-02 15:04 MST")
 }
 
 func dash(s string) string {

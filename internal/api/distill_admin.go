@@ -10,7 +10,7 @@ import (
 
 func (h *handler) distillDisabled(w http.ResponseWriter) bool {
 	if h.cfg.Distiller == nil || !h.cfg.Distiller.Enabled() {
-		fail(w, http.StatusServiceUnavailable, "技能沉淀未启用：请以 -distill 启动后重启")
+		fail(w, http.StatusServiceUnavailable, "技能沉淀未启用：检查 DISTILL_ENABLED（总开关）与服务启动日志")
 		return true
 	}
 	return false
@@ -86,6 +86,10 @@ func (h *handler) acceptSkillDraft(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.SkillHub != nil {
 		_ = h.cfg.SkillHub.Refresh(r.Context())
 	}
+	// 能力注册表是 app.New 时的一次性快照：accept 新增了 skill，不 Refresh
+	// 的话 /v1/capabilities 永远发现不到它，agent 也就用不上新能力。
+	// 刷新失败只记日志，不能把一次成功的 accept 改成 500。
+	h.refreshCapabilities(r)
 	h.audit(r, "skill.accept", "draft", r.PathValue("id"), map[string]any{"path": path})
 	writeJSON(w, http.StatusOK, map[string]string{"path": path})
 }
@@ -99,7 +103,20 @@ func (h *handler) rejectSkillDraft(w http.ResponseWriter, r *http.Request) {
 		h.distillFail(w, err)
 		return
 	}
+	// reject 也会改动草稿状态与索引，让能力注册表与 skills 保持一致。
+	// 与 accept 一样：失败只记日志，不影响这次成功的响应。
+	h.refreshCapabilities(r)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// refreshCapabilities 在草稿状态变化后重建能力注册表快照。nil / 报错都只记日志。
+func (h *handler) refreshCapabilities(r *http.Request) {
+	if h.cfg.Capabilities == nil {
+		return
+	}
+	if err := h.cfg.Capabilities.Refresh(r.Context()); err != nil {
+		h.log.Printf("刷新能力注册表失败（忽略）: %v", err)
+	}
 }
 
 func (h *handler) distillFail(w http.ResponseWriter, err error) {

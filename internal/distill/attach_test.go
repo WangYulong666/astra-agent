@@ -144,23 +144,32 @@ func twoOKRun(a *attachHarness) store.Run {
 
 // ── 1. 终态触发 ──────────────────────────────────────────────
 
-func TestAttachTriggersOnTerminalStates(t *testing.T) {
-	for _, status := range []string{store.RunCompleted, store.RunFailed, store.RunCancelled} {
-		t.Run(status, func(t *testing.T) {
+// 自动沉淀「只在 status == completed」时触发（不再是任意 IsTerminal）。
+func TestAttachTriggersOnCompletedOnly(t *testing.T) {
+	t.Run("completed triggers", func(t *testing.T) {
+		a := newAttachHarness(t)
+		run := twoOKRun(a)
+		publishState(a.bus, run.ID, store.RunCompleted)
+		req, ok := a.d.wait(t, 3*time.Second)
+		if !ok {
+			t.Fatal("completed 应触发自动沉淀")
+		}
+		if req.RunID != run.ID {
+			t.Errorf("RunID = %q，期望 %q", req.RunID, run.ID)
+		}
+		// 归属是从 store 反查的（事件里没有 tenant/user）。
+		if req.TenantID != "t1" || req.UserID != "u1" || req.SessionID != "sess-1" {
+			t.Errorf("归属反查不对: %+v", req)
+		}
+	})
+
+	// failed / cancelled 也是终态，但不是成功轨迹，不该刷草稿。
+	for _, status := range []string{store.RunFailed, store.RunCancelled} {
+		t.Run(status+" does not trigger", func(t *testing.T) {
 			a := newAttachHarness(t)
 			run := twoOKRun(a)
 			publishState(a.bus, run.ID, status)
-			req, ok := a.d.wait(t, 3*time.Second)
-			if !ok {
-				t.Fatal("终态没有触发自动沉淀")
-			}
-			if req.RunID != run.ID {
-				t.Errorf("RunID = %q，期望 %q", req.RunID, run.ID)
-			}
-			// 归属是从 store 反查的（事件里没有 tenant/user）。
-			if req.TenantID != "t1" || req.UserID != "u1" || req.SessionID != "sess-1" {
-				t.Errorf("归属反查不对: %+v", req)
-			}
+			a.d.expectNone(t, 300*time.Millisecond)
 		})
 	}
 }
@@ -354,4 +363,64 @@ func TestAttachEventCallbackIsFastAndSafe(t *testing.T) {
 		t.Fatal("没触发 Distill")
 	}
 	a.stop()
+}
+
+// ── 9. DISTILL_AUTO 的各种写法 ───────────────────────────────
+
+// 只有 false/0/no/off（大小写不敏感、去空白）为关，其余一律为开（默认开）。
+func TestDistillAutoEnabledParsing(t *testing.T) {
+	off := []string{"false", "FALSE", "False", "0", "no", "NO", "off", "OFF", "  false  ", " off "}
+	on := []string{"", "true", "TRUE", "1", "yes", "on", "garbage", "falseish", "-1"}
+	for _, v := range off {
+		t.Run("off="+v, func(t *testing.T) {
+			t.Setenv("DISTILL_AUTO", v)
+			if distillAutoEnabled() {
+				t.Fatalf("DISTILL_AUTO=%q 应为关", v)
+			}
+		})
+	}
+	for _, v := range on {
+		t.Run("on="+v, func(t *testing.T) {
+			t.Setenv("DISTILL_AUTO", v)
+			if !distillAutoEnabled() {
+				t.Fatalf("DISTILL_AUTO=%q 应为开", v)
+			}
+		})
+	}
+}
+
+// runAttachWithEnv 用真实 store + eventbus 起一次 Attach，返回假 Distiller 供计数。
+func runAttachWithEnv(t *testing.T, env string) *fakeDistiller {
+	t.Helper()
+	t.Setenv("DISTILL_AUTO", env)
+	h := newHarness(t, 40)
+	d := newFakeDistiller()
+	bus := eventbus.New()
+	stop := Attach(bus, d, h.st, log.New(io.Discard, "", 0))
+	t.Cleanup(stop)
+	run := twoOKRun(&attachHarness{h: h})
+	publishState(bus, run.ID, store.RunCompleted)
+	return d
+}
+
+// Attach 真的认这些「关」写法（不只是纯函数自测）。
+func TestAttachDisabledByCommonOffValues(t *testing.T) {
+	for _, v := range []string{"0", "no", "OFF", "  false  "} {
+		t.Run(v, func(t *testing.T) {
+			d := runAttachWithEnv(t, v)
+			d.expectNone(t, 300*time.Millisecond)
+		})
+	}
+}
+
+// 非「关」写法（含未设置 / 空串 / 任意值）都保持开启。
+func TestAttachEnabledByNonOffValues(t *testing.T) {
+	for _, v := range []string{"", "1", "yes", "on", "garbage"} {
+		t.Run("value="+v, func(t *testing.T) {
+			d := runAttachWithEnv(t, v)
+			if _, ok := d.wait(t, 3*time.Second); !ok {
+				t.Fatalf("DISTILL_AUTO=%q 应开启并沉淀", v)
+			}
+		})
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 )
 
 // ErrNotFound 是 ForRun 找不到对应诊断时返回的错误。
@@ -170,6 +171,58 @@ func (s *fileStore) Recent(ctx context.Context, sessionID string, limit int) ([]
 	s.mu.RUnlock()
 	sortByCreatedAtDesc(out)
 	return trim(out, limit), nil
+}
+
+// Pending 按 sessionID 过滤，只保留「未消费且 CreatedAt 晚于 since」的记录，
+// CreatedAt 倒序；limit<=0 用 20。回灌专用：Recent 会返回已消费 / 成功前的
+// 历史诊断，直接用它会导致同一条诊断在之后每一轮被重复注入。
+func (s *fileStore) Pending(ctx context.Context, sessionID string, since time.Time, limit int) ([]Diagnosis, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = defaultRecentLimit
+	}
+	s.mu.RLock()
+	out := make([]Diagnosis, 0, len(s.items))
+	for _, d := range s.items {
+		if d.SessionID == sessionID && d.ConsumedAt == nil && d.CreatedAt.After(since) {
+			out = append(out, d) // Diagnosis 全为值字段，拷贝安全
+		}
+	}
+	s.mu.RUnlock()
+	sortByCreatedAtDesc(out)
+	return trim(out, limit), nil
+}
+
+// MarkConsumed 把 runID 对应的未消费诊断标记为已消费并原子落盘。
+// 先在副本上改、写盘成功再换入缓存，与 append 保持一致的「缓存=磁盘」语义。
+// 找不到 / 已消费都视为成功（幂等），避免回灌因竞态重复标记而报错。
+func (s *fileStore) MarkConsumed(ctx context.Context, runID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	next := make([]Diagnosis, len(s.items))
+	copy(next, s.items)
+	found := false
+	for i := range next {
+		if next[i].RunID == runID && next[i].ConsumedAt == nil {
+			t := time.Now().UTC()
+			next[i].ConsumedAt = &t
+			found = true
+		}
+	}
+	if !found {
+		return nil
+	}
+	if err := writeInsights(s.path, next); err != nil {
+		return err
+	}
+	s.items = next
+	return nil
 }
 
 // All 全量 CreatedAt 倒序；limit<=0 用 50。

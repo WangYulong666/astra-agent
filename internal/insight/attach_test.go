@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -306,9 +307,34 @@ func TestAttachSuggestionRules(t *testing.T) {
 	for i, c := range cases {
 		rid := fmt.Sprintf("case-%02d", i)
 		d := e.diagnosis(t, rid)
-		if d.Suggestion != c.want {
-			t.Errorf("%s (err=%q):\n got=%q\nwant=%q", c.name, c.errText, d.Suggestion, c.want)
+		want := c.want
+		if want == fallbackSuggestion {
+			// 兜底文案含 {id}，落库前会替换成真实 runID。
+			want = strings.ReplaceAll(fallbackSuggestion, "{id}", rid)
 		}
+		if d.Suggestion != want {
+			t.Errorf("%s (err=%q):\n got=%q\nwant=%q", c.name, c.errText, d.Suggestion, want)
+		}
+	}
+}
+
+// 兜底建议里的 {id} 占位符必须替换成真实 runID 再落库，不能留一条点不开的假路径。
+func TestAttachFallbackSuggestionReplacesID(t *testing.T) {
+	e := newTestEnv(t, nil)
+	runID := "run-fallback-xyz"
+	e.makeRun(t, "s1", runID, "some random failure")
+	e.publish(runID, map[string]any{"status": store.RunFailed, "error": "some random failure"})
+	e.stop()
+
+	d := e.diagnosis(t, runID)
+	if strings.Contains(d.Suggestion, "{id}") {
+		t.Fatalf("建议里仍残留 {id} 占位符: %q", d.Suggestion)
+	}
+	if !strings.Contains(d.Suggestion, "/v1/runs/"+runID+"/activity") {
+		t.Fatalf("建议里没有真实 runID: %q", d.Suggestion)
+	}
+	if d.Suggestion == fallbackSuggestion {
+		t.Fatal("兜底建议没有被替换")
 	}
 }
 

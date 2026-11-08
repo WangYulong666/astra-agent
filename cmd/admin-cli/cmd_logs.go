@@ -29,6 +29,7 @@ const logsHelp = `用法：
   admin-cli logs approvals <runID>                     待/已决的人工审批
   admin-cli logs usage [--from T] [--to T] [--limit N] [--user ID]  用量流水
   admin-cli logs billing                               本月账单
+  admin-cli logs insights [--limit N] [--session ID]    失败 run 的结构化诊断与建议
 
 时间格式：RFC3339（2026-11-06T10:00:00Z）或纯日期（2026-11-06，按 UTC 当天 0 点）。
 所有命令都支持 --json 输出原始响应，便于脚本处理。
@@ -47,7 +48,7 @@ var logsValueFlags = clikit.BoolFlags(
 func isLogsSub(s string) bool {
 	switch s {
 	case "egress", "outbound", "history", "events", "activity", "timeline",
-		"children", "child", "approvals", "approval", "usage", "billing":
+		"children", "child", "approvals", "approval", "usage", "billing", "insights":
 		return true
 	}
 	return false
@@ -81,6 +82,8 @@ func (a *app) cmdLogs(sub string, args []string) int {
 		return a.logsUsage(args)
 	case "billing":
 		return a.logsBilling(args)
+	case "insights":
+		return a.logsInsights(args)
 	default:
 		if wantsHelp(args) || sub == "" {
 			fmt.Fprint(a.out, logsHelp)
@@ -290,17 +293,21 @@ func (a *app) logsUsage(args []string) int {
 	fs := a.newFlagSet("logs usage")
 	from := fs.String("from", "", "起始时间")
 	to := fs.String("to", "", "结束时间")
-	limit := fs.Int("limit", 100, "返回条数")
+	limit := fs.Int("limit", 100, "返回条数（服务端上限 5000）")
 	user := fs.String("user", "", "只看某个用户")
 	if _, code, done := a.parse(fs, args, logsValueFlags); done {
 		return code
+	}
+	qLimit := *limit
+	if qLimit > 5000 {
+		qLimit = 5000
 	}
 	c, err := a.api()
 	if err != nil {
 		return a.fail(err)
 	}
 	report, err := c.Usage(context.Background(), client.UsageQuery{
-		From: *from, To: *to, Limit: *limit, UserID: *user,
+		From: *from, To: *to, Limit: qLimit, UserID: *user,
 	})
 	if err != nil {
 		return a.fail(err)
@@ -338,6 +345,38 @@ func (a *app) logsBilling(args []string) int {
 		for _, k := range sortedMapKeys(out) {
 			fmt.Fprintf(a.out, "%-24s %v\n", k, out[k])
 		}
+		return nil
+	})
+}
+
+// logsInsights 列失败 run 的结构化诊断。设计文档 §3 承诺的 CLI 路径，
+// 后端 GET /v1/insights?limit=N&session_id=X 已存在。
+func (a *app) logsInsights(args []string) int {
+	fs := a.newFlagSet("logs insights")
+	limit := fs.Int("limit", 50, "返回条数（服务端上限 500）")
+	session := fs.String("session", "", "按会话过滤；留空看全租户（需要 owner/admin）")
+	if _, code, done := a.parse(fs, args, logsValueFlags); done {
+		return code
+	}
+	c, err := a.api()
+	if err != nil {
+		return a.fail(err)
+	}
+	items, err := c.AdminInsights(context.Background(), *session, *limit)
+	if err != nil {
+		return a.fail(err)
+	}
+	return a.jsonOut(items, func() error {
+		t := &clikit.Table{Header: []string{"时间", "RUN", "状态", "错误", "最后工具", "建议"}}
+		for _, it := range items {
+			t.Rows = append(t.Rows, []string{
+				formatTime(it.CreatedAt), dash(it.RunID), dash(it.Status),
+				clikit.Trunc(dash(it.Error), 40), dash(it.LastTool),
+				clikit.Trunc(dash(it.Suggestion), 48),
+			})
+		}
+		t.Render(a.out)
+		fmt.Fprintf(a.out, "共 %d 条诊断\n", len(items))
 		return nil
 	})
 }

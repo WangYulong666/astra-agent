@@ -469,7 +469,7 @@ else:
             names = [e.get("name") for e in (c.get("env") or [])]
             astra = [n for n in names if n and n.startswith("ASTRA_")]
             if astra:
-                print("     ASTRA_* 环境变量只作为 args 的 $(VAR) 载体注入（程序不读它们）: %s"
+                print("     ASTRA_* 环境变量（多数作 args 的 $(VAR) 载体；闭环相关如 ASTRA_CLI_BIN 由程序直读）: %s"
                       % ", ".join(sorted(astra)))
 
 # ── 10. 指标注解 ─────────────────────────────────────────────
