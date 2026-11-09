@@ -25,6 +25,7 @@ import (
 	"github.com/WangYulong666/astra-agent/internal/collab"
 	"github.com/WangYulong666/astra-agent/internal/connector"
 	"github.com/WangYulong666/astra-agent/internal/distill"
+	"github.com/WangYulong666/astra-agent/internal/doclib"
 	"github.com/WangYulong666/astra-agent/internal/egress"
 	"github.com/WangYulong666/astra-agent/internal/eventbus"
 	"github.com/WangYulong666/astra-agent/internal/insight"
@@ -88,6 +89,8 @@ type Config struct {
 	Capabilities capability.Registry
 	SkillHub     skillhub.Hub
 	Insights     insight.Store
+	// Docs 是内置文档库（含运行时生成的功能总览）。nil 时回 503。
+	Docs doclib.Library
 
 	TraceEndpoint     string
 	TraceDashboardURL string
@@ -229,6 +232,11 @@ func Handler(cfg Config) (http.Handler, error) {
 	// ── 行动账本（用户视角）─────────────────────────────────────
 	mux.HandleFunc("GET /v1/runs/{id}/activity", h.authed(h.runActivity, auth.ActionSessionRead))
 	mux.HandleFunc("GET /v1/sessions/{id}/activity", h.authed(h.sessionActivity, auth.ActionSessionRead))
+
+	// ── 文档模块（只读，随二进制分发）────────────────────────────
+	mux.HandleFunc("GET /v1/docs", h.authed(h.listDocs, auth.ActionSessionRead))
+	mux.HandleFunc("GET /v1/docs/search", h.authed(h.searchDocs, auth.ActionSessionRead))
+	mux.HandleFunc("GET /v1/docs/{path...}", h.authed(h.getDoc, auth.ActionSessionRead))
 
 	// ── 自闭环：能力发现 / 技能注册 / 失败诊断 ─────────────────
 	mux.HandleFunc("GET /v1/capabilities", h.authed(h.listCapabilities, auth.ActionSessionRead))

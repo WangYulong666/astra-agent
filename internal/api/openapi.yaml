@@ -62,6 +62,8 @@ tags:
     description: "多 agent 协作：父 run 派生独立沙箱的子 agent 并等它回话。"
   - name: Activity
     description: "用户视角行动账本：做了什么、卡在哪、为什么停了。"
+  - name: Docs
+    description: "内置文档库：使用指南随二进制分发，功能总览运行时生成。"
   - name: Capabilities
     description: "机器可读的能力注册表（API / CLI / skill），支持渐进式披露。"
   - name: Insights
@@ -2207,6 +2209,69 @@ paths:
       responses:
         "200":
           description: "诊断列表。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/docs:
+    get:
+      operationId: list_docs
+      summary: "文档索引：按分类列出全部文档（不含正文）。"
+      tags: [Docs]
+      responses:
+        "200":
+          description: "文档列表。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/docs/search:
+    get:
+      operationId: search_docs
+      summary: "在标题、摘要与正文里搜索文档。"
+      tags: [Docs]
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: "搜索词。"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+          description: "返回条数上限，最大 100。"
+      responses:
+        "200":
+          description: "命中的文档摘要。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/docs/{path...}:
+    get:
+      operationId: get_doc
+      summary: "取单篇文档全文。"
+      tags: [Docs]
+      parameters:
+        - name: path
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "文档相对路径，如 design/self-evolving-loop.md；overview 是生成的功能总览。"
+      responses:
+        "200":
+          description: "文档全文。"
         "503":
           description: "能力未启用。"
           content:

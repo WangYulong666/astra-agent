@@ -14,8 +14,19 @@ import (
 )
 
 type Diagnosis struct {
-	RunID      string    `json:"runId"`
-	SessionID  string    `json:"sessionId"`
+	RunID     string `json:"runId"`
+	SessionID string `json:"sessionId"`
+	// TenantID / UserID 是诊断的归属，由 Attach 从 run → session 反查填入。
+	//
+	// 为什么必须落库：诊断里含错误文本、最后工具名和建议（可能带路径/命令），
+	// 是跨租户最不该看到的那类数据。查询侧只能按这两个字段过滤，而 run 表
+	// 本身没有租户字段（归属永远在会话上），所以写入时就要把归属固化下来。
+	//
+	// 兼容：接入认证之前写入的老记录没有这两个字段（空串）。读取侧把它们
+	// 视为「无归属」，只在单机兼容模式（ViaDev）下可见，详见 store.ByTenant。
+	TenantID string `json:"tenantId,omitempty"`
+	UserID   string `json:"userId,omitempty"`
+
 	Status     string    `json:"status"`
 	Error      string    `json:"error"`
 	LastTool   string    `json:"lastTool,omitempty"`
@@ -40,7 +51,18 @@ type Activity interface {
 }
 
 type Store interface {
+	// Recent 按 sessionID 过滤（调用方必须先校验会话归属），CreatedAt 倒序。
+	// 签名保持不变：runner 的回灌链路在用，改签名会波及不能动的 manager.go。
 	Recent(ctx context.Context, sessionID string, limit int) ([]Diagnosis, error)
+	// ByTenant 按租户过滤，CreatedAt 倒序。HTTP 层的默认列表用它，
+	// 不再把全量诊断暴露给任意能读审计的角色。
+	//
+	// tenantID 为空时只返回「自身也无租户」的记录（接入认证前写入的老数据）；
+	// 正常身份永远带非空 TenantID，因此老数据对它们不可见——这是刻意的取舍：
+	// 没有归属的数据猜不出属于谁，宁可不展示。
+	ByTenant(ctx context.Context, tenantID string, limit int) ([]Diagnosis, error)
+	// All 全量。只在单机兼容模式（ViaDev，进程里没有租户概念）与测试里使用；
+	// 正常身份必须走 ByTenant。
 	All(ctx context.Context, limit int) ([]Diagnosis, error)
 	ForRun(ctx context.Context, runID string) (Diagnosis, error)
 	// Pending 只返回未被消费、且 CreatedAt 晚于 since 的诊断（CreatedAt 倒序）。

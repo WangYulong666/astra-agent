@@ -151,6 +151,11 @@ var codeRoutes = []string{
 	"GET /v1/runs/{id}/activity",
 	"GET /v1/sessions/{id}/activity",
 
+	// 文档模块（只读，随二进制分发）
+	"GET /v1/docs",
+	"GET /v1/docs/search",
+	"GET /v1/docs/{path...}",
+
 	// 自闭环：能力发现 / 技能注册 / 失败诊断
 	"GET /v1/capabilities",
 	"GET /v1/capabilities/{name}",
@@ -686,6 +691,9 @@ func probeURL(p, method, sessID, doomedID, runID string) (string, bool) {
 		return strings.ReplaceAll(p, "{name}", "github"), true
 	// 能力/技能单项查询的 {name}：能力未启用时 handler 回 503，启用时回 404，
 	// 两种都算「路由存在」。
+	// 文档路径是 {path...} 通配，探针填一个生成文档的路径即可。
+	case strings.HasPrefix(p, "/v1/docs/"):
+		return strings.ReplaceAll(p, "{path...}", "overview"), true
 	case strings.HasPrefix(p, "/v1/capabilities/"), p == "/v1/skills/{name}":
 		return strings.ReplaceAll(p, "{name}", probeDummyID), true
 	}

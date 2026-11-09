@@ -405,6 +405,8 @@ func New(cfg Config) (*Server, error) {
 	skillHub := openSkillHub(lg, cfg, s.hub, switches, cliBin)
 	caps := openCapabilityRegistry(lg, skillHub, switches)
 	insights, stopInsight := openInsights(lg, st, ledger, s.hub, cfg)
+	// 文档模块：手写文档随二进制分发 + 运行时生成的功能总览。
+	docsLib := openDocs(lg, cfg, caps, info)
 	s.stopInsight = stopInsight
 	// Start 之前控制面还没监听：url 置空，CreateSession 就不会注入一个
 	// 连不上的 ASTRA_SERVER。真正地址由 Start 用 normalizeLoopback 回填。
@@ -412,6 +414,7 @@ func New(cfg Config) (*Server, error) {
 	info["capabilities"] = boolLabel(caps != nil)
 	info["skills"] = boolLabel(skillHub != nil)
 	info["insights"] = boolLabel(insights != nil)
+	info["docs"] = boolLabel(docsLib != nil)
 
 	h, err := api.Handler(api.Config{
 		Manager: mgr, Store: st, Hub: s.hub, Provider: prov, Logger: lg,
@@ -428,7 +431,7 @@ func New(cfg Config) (*Server, error) {
 		Egress:         capa.Egress, Schedules: capa.Schedules, Scheduler: capa.Scheduler,
 		Distiller: capa.Distiller, Connectors: capa.Connectors, Browsers: capa.Browsers,
 		Collab: coord, Ledger: ledger,
-		Capabilities: caps, SkillHub: skillHub, Insights: insights,
+		Capabilities: caps, SkillHub: skillHub, Insights: insights, Docs: docsLib,
 	})
 	if err != nil {
 		st.Close()

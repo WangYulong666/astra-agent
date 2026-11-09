@@ -25,6 +25,7 @@ import (
 	"github.com/WangYulong666/astra-agent/internal/collab"
 	"github.com/WangYulong666/astra-agent/internal/connector"
 	"github.com/WangYulong666/astra-agent/internal/distill"
+	"github.com/WangYulong666/astra-agent/internal/doclib"
 	"github.com/WangYulong666/astra-agent/internal/egress"
 	"github.com/WangYulong666/astra-agent/internal/eventbus"
 	"github.com/WangYulong666/astra-agent/internal/insight"
@@ -549,4 +550,121 @@ func openInsights(lg *log.Logger, st store.Store, ledger activity.Ledger,
 	stop := insight.Attach(hub, st, insightActivity{ledger: ledger}, dir, lg)
 	lg.Printf("失败诊断已启用（数据 %s）", dir)
 	return s, stop
+}
+
+// ── 文档模块 ──────────────────────────────────────────────────
+
+// capabilityOverview 把能力注册表与 /v1/meta 适配成 doclib 的生成源。
+// 功能总览必须实时生成：手写一份「我们做了什么」的清单，三天就会和代码对不上。
+type capabilityOverview struct {
+	caps capability.Registry
+	meta map[string]string
+}
+
+func (o capabilityOverview) Features(ctx context.Context) ([]doclib.Feature, error) {
+	if o.caps == nil {
+		return nil, nil
+	}
+	items, err := o.caps.List(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]doclib.Feature, 0, len(items))
+	for _, it := range items {
+		out = append(out, doclib.Feature{
+			Name: it.Name, Kind: it.Kind, Description: it.Description,
+			Enabled: it.Enabled, Source: it.Source, Unavailable: it.Unavailable,
+		})
+	}
+	return out, nil
+}
+
+func (o capabilityOverview) Meta() map[string]string { return o.meta }
+
+// ensureDocs 把随二进制分发的 docs/ 同步到 <dataDir>/docs。
+// 和 ensureCLIBin 同一套路：make build 把 docs 拷进 bin/，启动时再拷进数据目录。
+// 找不到 docs 不算失败——文档模块仍会生成「功能总览」，只是没有手写文档。
+func ensureDocs(cfg Config, lg *log.Logger) string {
+	dst := filepath.Join(cfg.DataDir, "docs")
+	if hasMarkdown(dst) {
+		return dst
+	}
+	var srcs []string
+	if exe, err := os.Executable(); err == nil {
+		srcs = append(srcs, filepath.Join(filepath.Dir(exe), "docs"))
+	}
+	if wd, err := os.Getwd(); err == nil {
+		srcs = append(srcs, filepath.Join(wd, "docs"))
+	}
+	for _, src := range srcs {
+		if !hasMarkdown(src) {
+			continue
+		}
+		if err := copyTree(src, dst); err != nil {
+			lg.Printf("同步文档到 %s 失败（只显示功能总览）: %v", dst, err)
+			return dst
+		}
+		lg.Printf("文档已同步：%s → %s", src, dst)
+		return dst
+	}
+	lg.Printf("⚠ 未找到 docs/ 目录：文档模块只有运行时生成的功能总览")
+	return dst
+}
+
+func hasMarkdown(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() && strings.HasSuffix(p, ".md") {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
+func copyTree(src, dst string) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	return filepath.WalkDir(src, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, rerr := filepath.Rel(src, p)
+		if rerr != nil {
+			return nil
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if !strings.HasSuffix(p, ".md") {
+			return nil // 只同步 markdown，图片等素材不入数据目录
+		}
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return nil
+		}
+		return os.WriteFile(target, b, 0o644)
+	})
+}
+
+func openDocs(lg *log.Logger, cfg Config, caps capability.Registry,
+	meta map[string]string) doclib.Library {
+	root := ensureDocs(cfg, lg)
+	lib, err := doclib.Open(doclib.Config{
+		Root:         root,
+		Overview:     capabilityOverview{caps: caps, meta: meta},
+		OverviewPath: "overview",
+	})
+	if err != nil {
+		lg.Printf("文档模块未启用: %v", err)
+		return nil
+	}
+	lg.Printf("文档模块已启用（根目录 %s）", root)
+	return lib
 }

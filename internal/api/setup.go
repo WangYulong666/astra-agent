@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -200,6 +201,9 @@ func (h *handler) loginToken(slug, email, password string) (string, error) {
 }
 
 // getLLMSettings 查看上游凭据状态。**永远不回 key 本体**，只回有没有。
+//
+// 读保持租户级权限（tenant:manage）：owner 需要知道「填了没、指向哪」，
+// 这不是跨租户数据，只是本进程的配置状态。写才需要平台管理员，见 platformAdmin。
 func (h *handler) getLLMSettings(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.LLMSettings == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"gateway": false})
@@ -211,9 +215,73 @@ func (h *handler) getLLMSettings(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// platformAdminEnv 是平台管理员白名单的环境变量（逗号分隔的 email，大小写不敏感）。
+//
+// 用环境变量而不是库里的角色：仓库里没有平台级角色（owner/admin/member 全是
+// 租户内的），而「能改进程级全局配置」天然是部署者/运维的身份，不是某个租户
+// 能授予的身份。等平台角色进库之后再迁移到这里。
+const platformAdminEnv = "ASTRA_PLATFORM_ADMINS"
+
+// platformAdmins 解析白名单。空值、多余逗号、首尾空白都忽略。
+func platformAdmins() []string {
+	raw := os.Getenv(platformAdminEnv)
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	out := make([]string, 0, 4)
+	for _, part := range strings.Split(raw, ",") {
+		if e := strings.ToLower(strings.TrimSpace(part)); e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// platformAdmin 判断该身份能否改写**进程级全局**配置（当前只有 LLM 上游）。
+//
+// 为什么不能用 tenant:manage：那个权限是租户级的，任一租户的 owner 都有；
+// 而 /v1/admin/llm-settings 改的是整个进程共用的上游 key/baseURL——
+// 拿 tenant:manage 当门槛，等于让任何租户把全平台的 prompt 改道到自己的
+// 服务器，这是最严重的一类越权。
+//
+// 语义（与部署文档一致）：
+//   - 白名单为空：只允许 ViaDev（单机兼容模式）。该模式没有身份、进程只服务
+//     一个用户，不存在「别的租户」可越，保持「clone 下来 make serve 就能用」。
+//   - 白名单非空：p.Email 命中即放行（大小写不敏感）。ViaDev 始终放行因为它
+//     没有 email 可比对，且它就是单机模式本身。
+func platformAdmin(p auth.Principal) bool {
+	if p.Via == auth.ViaDev {
+		return true
+	}
+	email := strings.ToLower(strings.TrimSpace(p.Email))
+	if email == "" {
+		return false
+	}
+	for _, e := range platformAdmins() {
+		if e == email {
+			return true
+		}
+	}
+	return false
+}
+
+// requirePlatformAdmin 是写端点的守卫：不通过时回 403 并说明怎么配。
+func (h *handler) requirePlatformAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if platformAdmin(h.principal(r)) {
+		return true
+	}
+	fail(w, http.StatusForbidden,
+		"修改全局 LLM 上游需要平台管理员：把操作者邮箱加入环境变量 "+
+			platformAdminEnv+"（逗号分隔）后重启；该变量为空时只允许单机兼容模式操作")
+	return false
+}
+
 // setLLMSettings 热更上游凭据。key 为空串=清除（回到「网关在但 502」的状态），
 // 前端要不要允许清，是它的事；后端不拦——排障时「把 key 摘掉看报错变化」是合法操作。
 func (h *handler) setLLMSettings(w http.ResponseWriter, r *http.Request) {
+	if !h.requirePlatformAdmin(w, r) {
+		return
+	}
 	if h.cfg.LLMSettings == nil {
 		fail(w, http.StatusPreconditionFailed, "LLM 网关未启用（启动时未开 llm-gateway）")
 		return
@@ -271,6 +339,11 @@ func (h *handler) setLLMSettings(w http.ResponseWriter, r *http.Request) {
 // 必须真连：向导里「测试通过」如果只是格式校验，用户填错 key 会在
 // 第一个任务上才发现，那时候他只会认为「agent 坏了」而不是「key 填错了」。
 func (h *handler) testLLMSettings(w http.ResponseWriter, r *http.Request) {
+	// 测试端点也要求平台管理员：它会把请求里的 baseUrl 连出去，
+	// 同样是「进程级上游」的一部分（可以用来探测内网、也可被当成入口）。
+	if !h.requirePlatformAdmin(w, r) {
+		return
+	}
 	var req struct {
 		APIKey  string `json:"apiKey"`
 		BaseURL string `json:"baseUrl"`

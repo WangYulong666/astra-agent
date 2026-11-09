@@ -180,6 +180,16 @@ func (a *attacher) diagnose(runID string, p statePayload) {
 	} else {
 		a.lg.Printf("insight: 读 run %s 失败（诊断仍会生成）: %v", runID, err)
 	}
+	// 归属从会话反查：run 表没有租户字段（归属永远挂在会话上）。
+	// 与 distill.Attach 同一条路径；读不到就留空，后续按「无归属」处理——
+	// 宁可这条诊断在租户视图里不出现，也不能把别人的数据挂到一个猜出来的租户下。
+	if d.SessionID != "" {
+		if sess, err := a.st.GetSession(ctx, d.SessionID); err == nil {
+			d.TenantID, d.UserID = sess.TenantID, sess.UserID
+		} else {
+			a.lg.Printf("insight: 读会话 %s 失败（诊断归属为空）: %v", d.SessionID, err)
+		}
+	}
 	if d.Error == "" {
 		d.Error = p.Error
 	}

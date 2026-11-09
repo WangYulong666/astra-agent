@@ -162,6 +162,38 @@ func TestAttachFailedAndCancelledGenerate(t *testing.T) {
 	}
 }
 
+// 诊断必须带上租户/用户归属：否则 HTTP 层无法做隔离，只能全量暴露。
+func TestAttachFillsTenantAndUserFromSession(t *testing.T) {
+	e := newTestEnv(t, nil)
+	if err := e.st.CreateSession(context.Background(), store.Session{
+		ID: "s-owned", TenantID: "t1", UserID: "u1", Status: store.SessionActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e.makeRun(t, "s-owned", "run-owned", "boom")
+	e.publish("run-owned", map[string]any{"status": store.RunFailed})
+	e.stop()
+
+	d := e.diagnosis(t, "run-owned")
+	if d.TenantID != "t1" || d.UserID != "u1" {
+		t.Fatalf("归属未从会话反查填入: %+v", d)
+	}
+}
+
+// 会话读不到时诊断仍生成，但归属留空（宁可不出现在租户视图里，也不猜）。
+func TestAttachMissingSessionLeavesOwnershipEmpty(t *testing.T) {
+	e := newTestEnv(t, nil)
+	// run 指向一个不存在的会话。
+	e.makeRun(t, "s-ghost", "run-ghost", "boom")
+	e.publish("run-ghost", map[string]any{"status": store.RunFailed})
+	e.stop()
+
+	d := e.diagnosis(t, "run-ghost")
+	if d.TenantID != "" || d.UserID != "" {
+		t.Fatalf("无会话时不该有归属: %+v", d)
+	}
+}
+
 func TestAttachCompletedIgnored(t *testing.T) {
 	e := newTestEnv(t, nil)
 	e.makeRun(t, "s1", "run-ok", "")

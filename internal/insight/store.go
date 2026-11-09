@@ -225,6 +225,30 @@ func (s *fileStore) MarkConsumed(ctx context.Context, runID string) error {
 	return nil
 }
 
+// ByTenant 按租户过滤、CreatedAt 倒序；limit<=0 用 50。
+//
+// 老数据（TenantID 为空，接入认证之前写入）不会被任何非空租户看到：
+// 它们的归属无从推断，猜一个租户等于越权。handler 在单机兼容模式（ViaDev）
+// 下走 All，因此这些记录只在那种场景仍然可见。
+func (s *fileStore) ByTenant(ctx context.Context, tenantID string, limit int) ([]Diagnosis, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = defaultAllLimit
+	}
+	s.mu.RLock()
+	out := make([]Diagnosis, 0, len(s.items))
+	for _, d := range s.items {
+		if d.TenantID == tenantID {
+			out = append(out, d) // Diagnosis 全是值字段，拷贝安全
+		}
+	}
+	s.mu.RUnlock()
+	sortByCreatedAtDesc(out)
+	return trim(out, limit), nil
+}
+
 // All 全量 CreatedAt 倒序；limit<=0 用 50。
 func (s *fileStore) All(ctx context.Context, limit int) ([]Diagnosis, error) {
 	if err := ctx.Err(); err != nil {

@@ -4444,3 +4444,362 @@ kbd {
   .loop-panel { padding: 10px; }
 }
 
+/* ══════════════════════════════════════════════════════════════
+   内置文档（/admin/docs）—— 只追加，统一 .docs- 前缀。
+   颜色一律沿用现有 CSS 变量（--panel / --panel-2 / --text / --border /
+   --accent-soft …），不写死深色底：theme.css 把变量换成浅色主题时，
+   左树、徽标、表格边框会一起跟着变。
+
+   正文排版单独一组：文档是长文，行宽必须收窄（78ch）才有可读性，
+   而代码块/表格允许在自己的容器里横向滚——页面本身不能横向溢出。
+   ══════════════════════════════════════════════════════════════ */
+
+.docs-page {
+  /* 比其他管理页宽一点：左树 260 + 正文 78ch 才排得下 */
+  max-width: 1180px;
+}
+
+/* ── 搜索条 ── */
+.docs-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.docs-search {
+  position: relative;
+  flex: 1 1 240px;
+  min-width: 0;
+  max-width: 420px;
+}
+.docs-search .input {
+  padding-right: 30px;
+}
+.docs-clear {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--muted);
+}
+.docs-clear:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+.docs-spacer {
+  flex: 1 1 auto;
+}
+
+/* 窄屏的目录下拉：宽屏隐藏 */
+.docs-picker {
+  display: none;
+  width: 100%;
+  height: 40px;
+  font-size: 14px;
+}
+
+/* ── 两栏骨架 ── */
+.docs-shell {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 22px;
+  align-items: start;
+}
+.docs-nav {
+  min-width: 0;
+  position: sticky;
+  top: 0;
+  max-height: calc(100vh - 190px);
+  overflow: auto;
+  padding-right: 2px;
+}
+
+/* ── 左树 ── */
+.docs-group {
+  margin-bottom: 12px;
+}
+.docs-group-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 9px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.docs-group-count {
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+.docs-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 9px;
+  border-radius: 8px;
+  /* 选中态用左侧强调条，不改变 padding，避免点击时整行文字横向抖动 */
+  border-left: 2px solid transparent;
+  text-align: left;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.docs-link:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+.docs-link.on {
+  background: var(--accent-soft);
+  color: var(--text);
+  border-left-color: var(--accent);
+}
+.docs-link-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.docs-link-live {
+  flex: none;
+  font-size: 10px;
+  color: var(--accent);
+}
+
+/* ── 搜索结果（占用左树的位置）── */
+.docs-results {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.docs-result {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 9px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  text-align: left;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.docs-result:hover {
+  background: var(--panel-2);
+}
+.docs-result.on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.docs-result-title {
+  font-size: 12.5px;
+  color: var(--text);
+}
+.docs-result-path {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.docs-result-sum {
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* 命中片段：和会话检索的 .palette mark 同一套取色（强调色半透明底） */
+.docs-hit {
+  background: var(--accent-soft);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 0 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* ── 右栏：标题与元信息 ── */
+.docs-doc {
+  min-width: 0;
+}
+.docs-doc-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 12px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.docs-doc-title {
+  font-size: 21px;
+  line-height: 1.35;
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.docs-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.docs-path {
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.docs-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+}
+
+/* ── 正文 ──
+   .md 已经给了标题/代码/引用/链接的排版，这里只补文档页特有的：
+   行宽、h4、表格、以及「长文里的列表别太挤」。 */
+.docs-body {
+  max-width: 78ch;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.docs-body h4 {
+  margin: 16px 0 8px;
+  font-size: 14.5px;
+  line-height: 1.35;
+  font-weight: 600;
+  color: var(--text);
+}
+.docs-body ul,
+.docs-body ol {
+  margin: 0.4em 0 0.9em;
+  padding-left: 1.5em;
+}
+.docs-body li > ul,
+.docs-body li > ol {
+  margin: 0.2em 0;
+}
+/* 表格：外层容器横向滚，表格本身不撑破页面 */
+.docs-table {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 0.9em 0;
+  -webkit-overflow-scrolling: touch;
+}
+.docs-table table {
+  width: 100%;
+  min-width: 360px;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.docs-body th,
+.docs-body td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.docs-body th {
+  background: var(--panel-2);
+  color: var(--text);
+  font-weight: 500;
+}
+.docs-body td {
+  color: var(--text-2);
+}
+
+.docs-empty {
+  padding: 18px 4px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+/* .notice-sub 里的「路径 + 重试」是相邻的行内元素，默认会粘在一起 */
+.docs-page .notice-sub {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* ── 响应式 ──
+   1023：树收窄但仍是左栏；
+   767（含 393）：树整块收成顶部下拉（.docs-picker），正文占满。
+   搜索时左栏是结果列表，那时把下拉隐藏、把结果列表放回文档上方。 */
+@media (max-width: 1023px) {
+  .docs-shell {
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 16px;
+  }
+}
+@media (max-width: 767px) {
+  .docs-page {
+    max-width: none;
+  }
+  .docs-picker {
+    display: block;
+  }
+  .docs-shell {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+  .docs-nav {
+    display: none;
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
+  .docs-shell.searching .docs-nav {
+    display: block;
+  }
+  .docs-doc-title {
+    font-size: 18px;
+  }
+  .docs-body {
+    max-width: none;
+    font-size: 14px;
+  }
+  .docs-search {
+    flex-basis: 100%;
+    max-width: none;
+  }
+  /* 窄屏 .page-head 变成纵向 flex，按钮默认会被拉成整行——
+     一个「刷新」占满宽度太重，按内容宽度靠左即可。 */
+  .docs-page .page-head .page-act {
+    align-self: flex-start;
+  }
+  /* 393 上「共 N 篇 · M 类」会把搜索框挤成两行，计数不是必需信息 */
+  .docs-count {
+    display: none;
+  }
+  .docs-clear {
+    width: 30px;
+    height: 30px;
+  }
+}
+
+

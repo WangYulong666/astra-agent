@@ -24,6 +24,9 @@ build: ## 编译全部二进制到 bin/
 	go build -o $(BIN)/astra-sandbox ./cmd/astra-sandbox
 	go build -o $(BIN)/astra-server ./cmd/astra-server
 	go build -o $(BIN)/astra-cli ./cmd/astra-cli
+	@# 文档随二进制分发：astra-server 启动时会同步到 <dataDir>/docs，供文档模块读取。
+	@rm -rf $(BIN)/docs && cp -R docs $(BIN)/docs
+	@printf '  文档 %s 篇\n' "$$(find $(BIN)/docs -name '*.md' | wc -l | tr -d ' ')"
 	@ls -lh $(BIN)/
 
 # ── 前端 ──────────────────────────────────────────────────────

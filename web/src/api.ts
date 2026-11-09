@@ -705,3 +705,46 @@ export const insightApi = {
     return request<InsightsResponse>(`/v1/insights?${q.toString()}`)
   },
 }
+
+// ── 内置文档库（GET /v1/docs …）──────────────────────────────────
+//
+// 文档只读、按 session:read 放行。未启用时三个接口都返回 503 + {"error":…}，
+// 前端据此显示「文档模块未启用」，不画空目录。
+//
+// path 允许带 `/`（如 design/self-evolving-loop.md）。这里**逐段**编码：
+// 分隔符保持原样，段内的中文/空格/`#` 等交给 encodeURIComponent。
+// （整段编码也能用——Go 的 {path...} 会收到解码后的值——但逐段更直观，
+// 也不会让代理层把 %2F 当成路径分隔符做归一化。）
+
+export type DocMeta = {
+  path: string
+  title: string
+  category: string
+  summary: string
+  /** Go 的 time.Time，未设置时后端 omitempty 掉；展示前用 fmtTime 兜底。 */
+  updatedAt?: string
+  /** 运行时生成（功能总览），只读、不来自 docs/ 目录。 */
+  generated?: boolean
+}
+
+export type DocDetail = DocMeta & { body: string }
+
+export type DocsIndexResponse = { items: DocMeta[] }
+export type DocsSearchResponse = { items: DocMeta[]; query: string }
+
+/** 把文档路径拼成 URL 路径：逐段编码，保留 `/` 语义。 */
+export function docUrlPath(path: string): string {
+  return String(path || '')
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/')
+}
+
+export const docApi = {
+  index: () => request<DocsIndexResponse>('/v1/docs'),
+  get: (path: string) => request<DocDetail>(`/v1/docs/${docUrlPath(path)}`),
+  search: (q: string, limit = 20) =>
+    request<DocsSearchResponse>(
+      `/v1/docs/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+    ),
+}

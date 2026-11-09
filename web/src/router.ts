@@ -21,6 +21,8 @@ export const ROUTES = [
   '/admin/activity',
   '/admin/capabilities',
   '/admin/insights',
+  // 内置文档：功能总览 + 使用指南 + 设计/决策记录，随二进制分发、离线可读
+  '/admin/docs',
   '/admin/tenants',
   '/admin/settings',
 ] as const

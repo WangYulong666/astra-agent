@@ -131,6 +131,9 @@ func TestSetupCompleteValidation(t *testing.T) {
 func TestLLMSettingsRoundTrip(t *testing.T) {
 	llm := &fakeLLMSettings{}
 	h := newSetupHarness(t, llm)
+	// 写全局上游要求平台管理员；这里把 owner 放进白名单，
+	// 「不在白名单 → 403」由 TestLLMSettingsRequiresPlatformAdmin 单独覆盖。
+	t.Setenv(platformAdminEnv, "owner@acme.test")
 
 	// 未初始化的系统没有身份，管理端点必须拒绝
 	if code, _ := h.do(t, "GET", "/v1/admin/llm-settings", "", nil); code == 200 {
@@ -185,6 +188,7 @@ func TestLLMSettingsProbe(t *testing.T) {
 func TestLLMSettingsKeepKeyAndClear(t *testing.T) {
 	llm := &fakeLLMSettings{}
 	h := newSetupHarness(t, llm)
+	t.Setenv(platformAdminEnv, "owner@acme.test")
 	_, owner, _, _ := h.seedTenant(t)
 
 	// 先存一把 key

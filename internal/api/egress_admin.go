@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/WangYulong666/astra-agent/internal/auth"
 	"github.com/WangYulong666/astra-agent/internal/egress"
 )
 
@@ -22,18 +23,29 @@ func (h *handler) egressDisabled(w http.ResponseWriter) bool {
 	return false
 }
 
+// egressTenant 解析出本次请求只能操作的租户。
+//
+// 只认 Principal.TenantID：仓库里没有平台级角色——audit:read / tenant:manage
+// 都是**租户级**权限（租户 owner/admin 都可能有），拿它放行 ?tenant= 等于让
+// A 租户的 admin 读 B 租户的出网记录与策略。等真的引入平台角色（能跨租户
+// 读写的独立身份）再在这里加分支，而不是复用租户角色。
+//
+// 传了 ?tenant= 且不等于自己时回 403 并说明原因：这里不是「资源不存在」，
+// 而是「这个能力不存在」，诚实报错比 404 更好排障。
+func egressTenant(w http.ResponseWriter, p auth.Principal, r *http.Request) (string, bool) {
+	if tid := r.URL.Query().Get("tenant"); tid != "" && tid != p.TenantID {
+		fail(w, http.StatusForbidden, "没有平台级角色，不支持跨租户查询/修改出网配置；请去掉 tenant 参数（只能操作自己租户）")
+		return "", false
+	}
+	return p.TenantID, true
+}
+
 func (h *handler) egressPolicy(w http.ResponseWriter, r *http.Request) {
 	if h.egressDisabled(w) {
 		return
 	}
-	p := h.principal(r)
-	// 运营视角可指定租户；普通用户只能看自己的
-	tid := r.URL.Query().Get("tenant")
-	if tid == "" {
-		tid = p.TenantID
-	}
-	if tid != p.TenantID && !p.Can("tenant:manage") {
-		fail(w, http.StatusForbidden, "只能查看自己租户的出网策略")
+	tid, ok := egressTenant(w, h.principal(r), r)
+	if !ok {
 		return
 	}
 	pol, err := h.egressOf().Policy(r.Context(), tid)
@@ -49,6 +61,10 @@ func (h *handler) putEgressPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := h.principal(r)
+	tid, ok := egressTenant(w, p, r)
+	if !ok {
+		return
+	}
 	var pol egress.Policy
 	r.Body = http.MaxBytesReader(w, r.Body, 256<<10)
 	if err := json.NewDecoder(r.Body).Decode(&pol); err != nil {
@@ -69,7 +85,7 @@ func (h *handler) putEgressPolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := h.egressOf().SetPolicy(r.Context(), p.TenantID, pol); err != nil {
+	if err := h.egressOf().SetPolicy(r.Context(), tid, pol); err != nil {
 		h.failErr(w, err)
 		return
 	}
@@ -80,21 +96,15 @@ func (h *handler) egressLog(w http.ResponseWriter, r *http.Request) {
 	if h.egressDisabled(w) {
 		return
 	}
-	p := h.principal(r)
+	tid, ok := egressTenant(w, h.principal(r), r)
+	if !ok {
+		return
+	}
 	limit := 100
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			limit = min(n, 500)
 		}
-	}
-	// 只有能看全租户的角色才允许不带 tenant 参数看全部
-	tid := r.URL.Query().Get("tenant")
-	if tid == "" {
-		tid = p.TenantID
-	}
-	if tid != p.TenantID && !p.Can("audit:read") {
-		fail(w, http.StatusForbidden, "只能查看自己租户的出网记录")
-		return
 	}
 	items, err := h.egressOf().Log(r.Context(), tid, limit)
 	if err != nil && !errors.Is(err, egress.ErrDisabled) {

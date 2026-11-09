@@ -253,6 +253,54 @@ func TestStoreAllDefaultLimit(t *testing.T) {
 	}
 }
 
+// ByTenant 只返回该租户的诊断；无归属老数据（接入认证前写入）对任何
+// 非空租户都不可见——这是「猜不出归属就不展示」的取舍。
+func TestStoreByTenantFiltersAndHidesLegacy(t *testing.T) {
+	s, fs, _ := newStore(t)
+	mk := func(runID, tid string, at time.Time) Diagnosis {
+		d := mkDiag(runID, "s-"+tid, at)
+		d.TenantID = tid
+		d.UserID = "u-" + tid
+		return d
+	}
+	items := []Diagnosis{
+		mk("a1", "t1", testBase.Add(time.Minute)),
+		mk("b1", "t2", testBase.Add(2*time.Minute)),
+		mk("a2", "t1", testBase.Add(3*time.Minute)),
+		mkDiag("old", "s-old", testBase.Add(4*time.Minute)), // TenantID 为空
+	}
+	seedItems(t, fs, items)
+
+	got, err := s.ByTenant(context.Background(), "t1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].RunID != "a2" || got[1].RunID != "a1" {
+		t.Fatalf("t1 结果或排序错误: %+v", got)
+	}
+	for _, d := range got {
+		if d.TenantID != "t1" || d.UserID != "u-t1" {
+			t.Fatalf("归属字段丢失: %+v", d)
+		}
+	}
+
+	// 空租户只会匹配空租户：正常身份（TenantID 非空）永远不会命中老数据。
+	got, _ = s.ByTenant(context.Background(), "", 0)
+	if len(got) != 1 || got[0].RunID != "old" {
+		t.Fatalf("空租户应只返回无归属老数据: %+v", got)
+	}
+
+	// limit<=0 默认 50，limit 生效。
+	if got, _ := s.ByTenant(context.Background(), "t1", 1); len(got) != 1 || got[0].RunID != "a2" {
+		t.Fatalf("limit=1 错误: %+v", got)
+	}
+
+	// 未知租户返回空，不报错。
+	if got, err := s.ByTenant(context.Background(), "nope", 10); err != nil || len(got) != 0 {
+		t.Fatalf("未知租户应返回空: %v %+v", err, got)
+	}
+}
+
 func TestStoreForRunNotFound(t *testing.T) {
 	s, _, _ := newStore(t)
 	_, err := s.ForRun(context.Background(), "nope")
