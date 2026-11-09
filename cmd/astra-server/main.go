@@ -75,7 +75,16 @@ func main() {
 		lg.SetOutput(io.Discard)
 	}
 
-	dir := *dataDir
+	// 数据目录：显式 -data > ASTRA_DATA > ~/.astra/data。
+	// 为什么读 ASTRA_DATA：`make loop-check` 与运维脚本按这个变量定位 <dataDir>/bin/astra-cli，
+	// 若只有 flag 认它，两条链就会各看一个目录——门禁报「CLI 不可用」而服务其实跑得好好的。
+	// flag 显式给值仍优先，保持向后兼容（.env 在 flag.Parse 前加载，见 internal/app/dotenv.go）。
+	dir := strings.TrimSpace(*dataDir)
+	if dir == "" {
+		if v := strings.TrimSpace(os.Getenv("ASTRA_DATA")); v != "" {
+			dir = v
+		}
+	}
 	if dir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {

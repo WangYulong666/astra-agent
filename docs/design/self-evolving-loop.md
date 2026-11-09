@@ -170,7 +170,7 @@ func Open(dataDir string) (Store, error)
 3. **真机**：起服务 → 建会话 → 在沙箱里执行 `astra-cli whoami` 与 `astra-cli skills list`，返回 200 且身份是该会话；**白名单外一律拒绝**（含 `/v1/sessions/*`、`/v1/runs/*`，API 返回 403）——本轮未放开这些路径，也没有逐路径归属校验，故不再写「跨会话 404」。删掉会话后，已签发的 sandbox key 立即失效（会话存在性校验），无需轮换密钥。
 4. 一条成功的 run（≥2 工具调用）结束后，`GET /v1/skills/drafts` 自动多一条草稿（不用手工 POST）。
 5. 一条失败 run 后 `GET /v1/insights` 有结构化诊断；下一次 `StartRun` 的 prompt 带上一轮失败上下文（有开关可关）。
-6. `make doctor` 追加三项闭环自检（CLI 可执行 / skills 可读 / `/v1/capabilities` 200）。
+6. `make loop-check` 三项闭环自检（CLI 可执行 / skills 可读 / 控制面可达），并作为 `make doctor` 的前置步骤：CLI、skills 是硬性项（未就绪 exit 1），控制面默认只警告、`STRICT=1` 才致命。
 7. gofmt / vet / 全量 test / race / 前端 / linux-amd64 交叉编译 / CI 全绿。
 
 ## 7. 明确不做

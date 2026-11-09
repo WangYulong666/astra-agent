@@ -98,7 +98,10 @@ SANDBOX  ?= dev
 PROVIDER ?= local
 
 .PHONY: doctor
-doctor: build ## 检查当前 provider 缺什么（先跑这个）
+doctor: build ## 检查闭环前提 + 当前 provider 缺什么（先跑这个）
+	@# 闭环前提先跑：CLI / skills 缺了，后面 provider 再健康 agent 也干不了活。
+	@# loop-check 里控制面未起只是警告（非 STRICT），所以无服务时 doctor 仍然可过。
+	@$(MAKE) --no-print-directory loop-check
 	@$(SBX) -provider $(PROVIDER) doctor
 
 .PHONY: dev
@@ -331,6 +334,10 @@ deps-status: ## 逐个探测依赖的端口/健康端点，输出「谁没起来
 # /v1/capabilities 与 /v1/skills 要认证（astra-server 默认 -require-auth=true）；
 # 未设 ASTRA_TOKEN 时改探无需认证的 /readyz，至少能给出「控制面活着/没起」的真信号，
 # 不再把恒定 401 误报成「控制面未起」；所有探测一律 --noproxy '*' 防本机代理劫持。
+#
+# CLI 查找顺序与运行时一致：ASTRA_CLI_BIN → $ASTRA_DATA/bin/astra-cli → ./bin/astra-cli
+# → PATH。dataDir 默认 ~/.astra/data（与服务端 -data 的默认值相同，服务端也读 ASTRA_DATA），
+# 别再默认 ./data——那会让「刚 make build 完、还没起过服务」的仓库恒定红。
 .PHONY: loop-check
 loop-check: ## 检查自闭环前提（CLI 可执行 / skills 可读 / 能力接口可达）
 	@STRICT="$${ASTRA_STRICT:-$(STRICT)}"; \
@@ -354,8 +361,10 @@ loop-check: ## 检查自闭环前提（CLI 可执行 / skills 可读 / 能力接
 	cli=""; \
 	if [ -n "$${ASTRA_CLI_BIN:-}" ] && [ -x "$${ASTRA_CLI_BIN}" ]; then \
 	  cli="$${ASTRA_CLI_BIN}"; \
-	elif [ -x "$${ASTRA_DATA:-./data}/bin/astra-cli" ]; then \
-	  cli="$${ASTRA_DATA:-./data}/bin/astra-cli"; \
+	elif [ -x "$${ASTRA_DATA:-$$HOME/.astra/data}/bin/astra-cli" ]; then \
+	  cli="$${ASTRA_DATA:-$$HOME/.astra/data}/bin/astra-cli"; \
+	elif [ -x ./bin/astra-cli ]; then \
+	  cli="./bin/astra-cli（make build 产物；服务首次启动会拷到 <dataDir>/bin）"; \
 	elif command -v astra-cli >/dev/null 2>&1; then \
 	  cli="$$(command -v astra-cli)"; \
 	fi; \
@@ -363,7 +372,7 @@ loop-check: ## 检查自闭环前提（CLI 可执行 / skills 可读 / 能力接
 	  printf '\033[32mOK\033[0m  %s\n' "$$cli"; \
 	else \
 	  hard=$$((hard+1)); \
-	  printf '\033[31m失败\033[0m  ASTRA_CLI_BIN / <dataDir>/bin/astra-cli / PATH 均未找到可执行文件；make build 产出 bin/astra-cli，服务会拷到 <dataDir>/bin/\n'; \
+	  printf '\033[31m失败\033[0m  ASTRA_CLI_BIN / <dataDir>/bin/astra-cli / ./bin/astra-cli / PATH 均未找到可执行文件；先 make build（产物 bin/astra-cli）\n'; \
 	fi; \
 	if [ -z "$$tok" ]; then \
 	  printf '%-20s ' '控制面存活'; \
