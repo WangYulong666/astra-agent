@@ -103,7 +103,7 @@ func main() {
 		StoreKind: *storeKind, DSN: *dsn, RequireAuth: *requireAu, Bootstrap: *bootstrapFlag,
 		LLMGateway: *llmGateway, LLMUpstream: *llmUpstr, LLMKey: *llmKey,
 		LLMProvider: *llmProv, LLMPublicURL: *llmPublicURL,
-		Sweep: *sbSweep, Idle: *sbIdle, MaxAge: *sbMaxAge, Quota: *sbQuota,
+		Sweep: lifecycleDuration(*sbSweep), Idle: lifecycleDuration(*sbIdle), MaxAge: lifecycleDuration(*sbMaxAge), Quota: *sbQuota,
 	}
 	if *jwtSecret != "" {
 		cfg.JWTSecret = []byte(*jwtSecret)
@@ -185,4 +185,12 @@ func (e envFlags) map0() map[string]string {
 func fatal(lg *log.Logger, err error) {
 	lg.Printf("启动失败: %v", err)
 	os.Exit(1)
+}
+
+// Config 的零值表示使用默认值；CLI 的显式零表示关闭，转换成已有的负值哨兵。
+func lifecycleDuration(d time.Duration) time.Duration {
+	if d == 0 {
+		return -time.Nanosecond
+	}
+	return d
 }

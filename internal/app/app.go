@@ -354,7 +354,7 @@ func New(cfg Config) (*Server, error) {
 	lcPolicy := lifecycle.Policy{
 		SweepInterval: sweep, IdleTimeout: idle, MaxAge: maxAge, MaxPerTenant: cfg.Quota,
 	}
-	s.reaper = lifecycle.New(lcPolicy, lifecycle.Deps{Provider: prov, Store: st, Logger: lg})
+	s.reaper = lifecycle.New(lcPolicy, lifecycle.Deps{Provider: prov, Store: st, Logger: lg, WithIdleSession: mgr.WithIdleSession})
 	go s.reaper.Run(context.Background())
 
 	var quota *lifecycle.Quota

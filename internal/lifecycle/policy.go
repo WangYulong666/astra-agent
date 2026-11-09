@@ -7,6 +7,7 @@
 package lifecycle
 
 import (
+	"context"
 	"time"
 
 	"github.com/WangYulong666/astra-agent/internal/sandbox"
@@ -35,6 +36,8 @@ type Policy struct {
 type Deps struct {
 	Provider sandbox.Provider
 	Store    store.Store
+	// WithIdleSession 与 runner 的执行锁互斥，避免检查空闲后恰好开始执行。
+	WithIdleSession func(context.Context, string, func() error) (bool, error)
 	// Logger 为空时用 log.Default()。
 	Logger interface {
 		Printf(format string, v ...any)
@@ -44,10 +47,11 @@ type Deps struct {
 // Report 单次扫描的结果。字段都是计数，便于打日志与断言。
 type Report struct {
 	Scanned    int      // 枚举到的沙箱总数
+	Paused     int      // 停止运行但保留工作区和 agent home
 	Destroyed  int      // 本次销毁数
 	Orphaned   int      // 其中因「无对应会话」被销毁的
-	Expired    int      // 其中因 MaxAge 到期被销毁的
-	Idle       int      // 其中因空闲超时被销毁的
+	Expired    int      // 其中因 MaxAge 到期回收的（含暂停）
+	Idle       int      // 其中因空闲超时回收的（含暂停）
 	Kept       int      // 判定保留
 	Errors     []string // 单个沙箱处理失败的记录；不中断整轮扫描
 	StartedAt  time.Time

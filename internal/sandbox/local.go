@@ -217,6 +217,8 @@ func (l *Local) Create(ctx context.Context, req CreateRequest) (Sandbox, error) 
 			return nil, err
 		}
 		old.PID = cmd.Process.Pid
+		// MaxAge 限制这次运行时长，暂停保留的目录不应让重启后的进程立刻超龄。
+		old.CreatedAt = time.Now().UTC()
 		if err := waitHTTP(ctx, old.Port, 25*time.Second); err != nil {
 			_ = cmd.Process.Kill()
 			return nil, fmt.Errorf("sandbox: 在原目录上重启 acp-proxy 失败（端口 %d）：%w（看 %s）",
@@ -882,6 +884,7 @@ func (s *localSandbox) Resume(ctx context.Context) error {
 		return err
 	}
 	s.m.PID = cmd.Process.Pid
+	s.m.CreatedAt = time.Now().UTC()
 	s.m.State = StateRunning
 	if err := waitHTTP(ctx, s.m.Port, 25*time.Second); err != nil {
 		return fmt.Errorf("sandbox: resume 后 acp-proxy 未就绪: %w", err)
@@ -906,3 +909,16 @@ func (s *localSandbox) Kill(ctx context.Context) error {
 // 让编译器提醒我们接口变更时同步实现。
 var _ Provider = (*Local)(nil)
 var _ Sandbox = (*localSandbox)(nil)
+
+// Suspend 只释放运行资源；自动回收不应删除工作区、agent home 或快照。
+// 不走 Acquire：已停止的进程仍需保留数据并记录 paused 状态。
+func (l *Local) Suspend(ctx context.Context, id string) error {
+	if err := validateID(id); err != nil {
+		return err
+	}
+	m, err := l.readMeta(id)
+	if err != nil {
+		return err
+	}
+	return l.attachWithMeta(m).Pause(ctx)
+}

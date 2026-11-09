@@ -36,9 +36,9 @@ export function Lifecycle() {
   const sweep = async () => {
     const ok = window.confirm(
       '立即执行一轮沙箱回收？\n\n' +
-        '只销毁沙箱运行环境，不删除会话数据：历史消息、工具调用、审批记录都还在，' +
-        '下次发指令会重新起一个沙箱。\n\n' +
-        '正在执行的 run 会被中断。',
+        '本地会话自动回收会暂停进程并保留工作文件；孤儿或已删除会话的环境会被销毁。' +
+        '历史消息和审批记录仍保留。\n\n' +
+        '空闲回收会跳过未结束任务；达到最长存活时间仍会中断执行。',
     )
     if (!ok) return
     setBusy(true)
@@ -78,8 +78,8 @@ export function Lifecycle() {
         <div>
           <div className="page-title">沙箱回收</div>
           <div className="page-sub">
-            后台按周期扫描：无对应会话的孤儿、会话已结束、超过存活上限、长时间无活动的沙箱会被销毁。
-            销毁只回收运行环境，会话数据始终保留。
+            后台按周期扫描：无对应会话的孤儿、会话已结束、超过存活上限、长时间无活动的沙箱会被回收。
+            本地活跃会话回收时暂停进程并保留文件；空闲回收跳过未结束任务。
           </div>
         </div>
         <button
@@ -110,7 +110,7 @@ export function Lifecycle() {
 
       {justSwept && (
         <Notice kind="info">
-          刚刚清理完成：扫描 {justSwept.scanned} 个，销毁 {justSwept.destroyed} 个
+          刚刚清理完成：扫描 {justSwept.scanned} 个，暂停 {justSwept.paused ?? 0} 个，销毁 {justSwept.destroyed} 个
           （孤儿 {justSwept.orphaned} / 超龄 {justSwept.expired} / 空闲 {justSwept.idle}），
           保留 {justSwept.kept} 个。
         </Notice>
@@ -127,6 +127,7 @@ export function Lifecycle() {
                 <thead>
                   <tr>
                     <th className="num">扫描</th>
+                    <th className="num">暂停</th>
                     <th className="num">销毁</th>
                     <th className="num">孤儿</th>
                     <th className="num">超龄</th>
@@ -139,6 +140,7 @@ export function Lifecycle() {
                 <tbody>
                   <tr>
                     <td className="num">{last.scanned}</td>
+                    <td className="num">{last.paused ?? 0}</td>
                     <td className="num">{last.destroyed}</td>
                     <td className="num">{last.orphaned}</td>
                     <td className="num">{last.expired}</td>

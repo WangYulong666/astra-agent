@@ -232,87 +232,9 @@ func (m *Manager) CreateSession(ctx context.Context, opts CreateSessionOptions) 
 		id = newID()
 	}
 
-	spec := m.cfg.Agent
-	if m.cfg.Creds != nil {
-		// 真 key 不进沙箱：用短期虚拟 key 替换上游凭据，端点指向网关。
-		env, expiresAt, err := m.cfg.Creds.IssueForSession(ctx, SessionScope{
-			SessionID: id, TenantID: opts.TenantID, UserID: opts.UserID,
-		})
-		if err != nil {
-			return sess, fmt.Errorf("签发沙箱凭据失败: %w", err)
-		}
-		spec.Env = mergeEnv(spec.Env, env)
-		m.log.Printf("会话 %s 已签发沙箱凭据，有效期至 %s", id, expiresAt.Format(time.RFC3339))
-	}
-
-	// 出网代理：每个会话一个 nonce，凭据进 userinfo（客户端自动转成
-	// Proxy-Authorization），代理据此把流量归到租户/会话。
-	// 注意必须按会话生成，若把同一个 sandboxID 塞进共享的 cfg.Agent.Env，
-	// 所有会话的流量会挤在一个归属下，审计就失去意义。
-	if m.cfg.Egress != nil && m.cfg.Egress.Enabled() {
-		// NO_PROXY 必须无条件放行控制面：egress 代理默认拦私网，否则沙箱里的
-		// astra-cli 访问 ASTRA_SERVER 会被 403。这与 NetworkLock 解耦——网络锁
-		// 只影响下面 Seatbelt 的 ExtraAllow，不该决定 NO_PROXY 里有没有控制面。
-		spec.Env = mergeEnv(spec.Env, egress.EnvForWithBypass(
-			m.cfg.Egress.Addr(), id, newNonce(), m.egressBypassValue()))
-
-		// 双层出网边界：代理管「哪些域名能出去」，Seatbelt 管「只能连代理」。
-		// EGRESS_NO_PROXY 里的本机地址也要放行，否则 LLM 网关会被一起挡掉。
-		if m.cfg.NetworkLock {
-			var extra []string
-			for _, a := range strings.Split(m.cfg.EgressBypass, ",") {
-				if a = strings.TrimSpace(a); a != "" {
-					extra = append(extra, a)
-				}
-			}
-			spec.NetworkPolicy = &sandbox.NetworkPolicy{
-				Enabled:    true,
-				ProxyAddr:  m.cfg.Egress.Addr(),
-				ExtraAllow: extra,
-			}
-		}
-	}
-
-	// 第三方凭据：只注入该 租户+用户 自己已授权的连接器。
-	// proxy 模式已实现：注入的是 sidecar 基址而非 token，token 由 egress sidecar
-	// 转发时按用户取用注入；连接器是增强项，注入失败只记日志，不挡会话创建。
-	if m.cfg.Connectors != nil && m.cfg.Connectors.Enabled() {
-		if names := m.connectedNames(ctx, opts.TenantID, opts.UserID); len(names) > 0 {
-			env, err := m.cfg.Connectors.Inject(ctx, opts.TenantID, opts.UserID, names)
-			if err != nil {
-				m.log.Printf("会话 %s 注入连接器凭据失败（不影响会话）: %v", id, err)
-			} else {
-				spec.Env = mergeEnv(spec.Env, env)
-			}
-		}
-	}
-
-	// 让沙箱里的 astra-cli 真能跑：地址 + 会话级受限凭据 + 二进制路径。
-	// 凭据用 scope=sandbox 的短期 key，不是平台 JWT；API 侧有窄白名单与归属校验。
-	if h := m.cfg.Hints; h != nil {
-		_, url, cli := h.Snapshot()
-		env := map[string]string{}
-		if url != "" {
-			env["ASTRA_SERVER"] = url
-		}
-		if cli != "" {
-			env["ASTRA_CLI_BIN"] = cli
-		}
-		if m.cfg.SandboxKeyIssuer != nil && opts.TenantID != "" && opts.UserID != "" {
-			if tok, _, err := m.cfg.SandboxKeyIssuer.IssueSandboxKey(
-				opts.TenantID, opts.UserID, id, 0); err == nil {
-				env["ASTRA_TOKEN"] = tok
-			} else {
-				m.log.Printf("会话 %s 签发沙箱凭据失败（skill 内 CLI 将不可用）: %v", id, err)
-			}
-		}
-		spec.Env = mergeEnv(spec.Env, env)
-		// 开了网络锁时，控制面回环地址必须显式放行，否则 CLI 连不上 7788。
-		if m.cfg.NetworkLock && url != "" && spec.NetworkPolicy != nil {
-			if hp := hostPortOf(url); hp != "" {
-				spec.NetworkPolicy.ExtraAllow = append(spec.NetworkPolicy.ExtraAllow, hp)
-			}
-		}
+	spec, err := m.sessionAgent(ctx, id, opts)
+	if err != nil {
+		return sess, err
 	}
 
 	req := sandbox.CreateRequest{
@@ -913,10 +835,13 @@ func (m *Manager) ensureClient(ctx context.Context, b *binding) (*acp.Client, er
 		// local 的 Create 对同 ID 是幂等的：沿用上次的端口与 agent 命令，只重启进程。
 		// 不传 Token：provider 会沿用 meta 里已有凭据，
 		// 控制面因此不需要持有明文 token。
-		sb, err = m.cfg.Provider.Create(ctx, sandbox.CreateRequest{
-			ID:    b.sess.ID,
-			Agent: m.cfg.Agent,
+		spec, specErr := m.sessionAgent(ctx, b.sess.ID, CreateSessionOptions{
+			TenantID: b.sess.TenantID, UserID: b.sess.UserID,
 		})
+		if specErr != nil {
+			return nil, specErr
+		}
+		sb, err = m.cfg.Provider.Create(ctx, sandbox.CreateRequest{ID: b.sess.ID, Agent: spec})
 	}
 	if err != nil {
 		return nil, fmt.Errorf("取沙箱失败: %w", err)
@@ -1337,4 +1262,126 @@ func mergeBypass(existing, extra string) string {
 	}
 	add(extra)
 	return strings.Join(out, ",")
+}
+
+// sessionAgent 每次启动进程都重签凭据，不把首次创建时的临时配置留在旧进程里。
+func (m *Manager) sessionAgent(ctx context.Context, id string, opts CreateSessionOptions) (sandbox.AgentSpec, error) {
+	spec := m.cfg.Agent
+	if m.cfg.Creds != nil {
+		// 真 key 不进沙箱：用短期虚拟 key 替换上游凭据，端点指向网关。
+		env, expiresAt, err := m.cfg.Creds.IssueForSession(ctx, SessionScope{
+			SessionID: id, TenantID: opts.TenantID, UserID: opts.UserID,
+		})
+		if err != nil {
+			return sandbox.AgentSpec{}, fmt.Errorf("签发沙箱凭据失败: %w", err)
+		}
+		spec.Env = mergeEnv(spec.Env, env)
+		m.log.Printf("会话 %s 已签发沙箱凭据，有效期至 %s", id, expiresAt.Format(time.RFC3339))
+	}
+
+	// 出网代理：每个会话一个 nonce，凭据进 userinfo（客户端自动转成
+	// Proxy-Authorization），代理据此把流量归到租户/会话。
+	// 注意必须按会话生成，若把同一个 sandboxID 塞进共享的 cfg.Agent.Env，
+	// 所有会话的流量会挤在一个归属下，审计就失去意义。
+	if m.cfg.Egress != nil && m.cfg.Egress.Enabled() {
+		// NO_PROXY 必须无条件放行控制面：egress 代理默认拦私网，否则沙箱里的
+		// astra-cli 访问 ASTRA_SERVER 会被 403。这与 NetworkLock 解耦——网络锁
+		// 只影响下面 Seatbelt 的 ExtraAllow，不该决定 NO_PROXY 里有没有控制面。
+		spec.Env = mergeEnv(spec.Env, egress.EnvForWithBypass(
+			m.cfg.Egress.Addr(), id, newNonce(), m.egressBypassValue()))
+
+		// 双层出网边界：代理管「哪些域名能出去」，Seatbelt 管「只能连代理」。
+		// EGRESS_NO_PROXY 里的本机地址也要放行，否则 LLM 网关会被一起挡掉。
+		if m.cfg.NetworkLock {
+			var extra []string
+			for _, a := range strings.Split(m.cfg.EgressBypass, ",") {
+				if a = strings.TrimSpace(a); a != "" {
+					extra = append(extra, a)
+				}
+			}
+			spec.NetworkPolicy = &sandbox.NetworkPolicy{
+				Enabled:    true,
+				ProxyAddr:  m.cfg.Egress.Addr(),
+				ExtraAllow: extra,
+			}
+		}
+	}
+
+	// 第三方凭据：只注入该 租户+用户 自己已授权的连接器。
+	// proxy 模式已实现：注入的是 sidecar 基址而非 token，token 由 egress sidecar
+	// 转发时按用户取用注入；连接器是增强项，注入失败只记日志，不挡会话创建。
+	if m.cfg.Connectors != nil && m.cfg.Connectors.Enabled() {
+		if names := m.connectedNames(ctx, opts.TenantID, opts.UserID); len(names) > 0 {
+			env, err := m.cfg.Connectors.Inject(ctx, opts.TenantID, opts.UserID, names)
+			if err != nil {
+				m.log.Printf("会话 %s 注入连接器凭据失败（不影响会话）: %v", id, err)
+			} else {
+				spec.Env = mergeEnv(spec.Env, env)
+			}
+		}
+	}
+
+	// 让沙箱里的 astra-cli 真能跑：地址 + 会话级受限凭据 + 二进制路径。
+	// 凭据用 scope=sandbox 的短期 key，不是平台 JWT；API 侧有窄白名单与归属校验。
+	if h := m.cfg.Hints; h != nil {
+		_, url, cli := h.Snapshot()
+		env := map[string]string{}
+		if url != "" {
+			env["ASTRA_SERVER"] = url
+		}
+		if cli != "" {
+			env["ASTRA_CLI_BIN"] = cli
+		}
+		if m.cfg.SandboxKeyIssuer != nil && opts.TenantID != "" && opts.UserID != "" {
+			if tok, _, err := m.cfg.SandboxKeyIssuer.IssueSandboxKey(
+				opts.TenantID, opts.UserID, id, 0); err == nil {
+				env["ASTRA_TOKEN"] = tok
+			} else {
+				m.log.Printf("会话 %s 签发沙箱凭据失败（skill 内 CLI 将不可用）: %v", id, err)
+			}
+		}
+		spec.Env = mergeEnv(spec.Env, env)
+		// 开了网络锁时，控制面回环地址必须显式放行，否则 CLI 连不上 7788。
+		if m.cfg.NetworkLock && url != "" && spec.NetworkPolicy != nil {
+			if hp := hostPortOf(url); hp != "" {
+				spec.NetworkPolicy.ExtraAllow = append(spec.NetworkPolicy.ExtraAllow, hp)
+			}
+		}
+	}
+
+	return spec, nil
+}
+
+// WithIdleSession 与 execute 共用信号量。回收期间新任务可以排队，但不能启动 agent。
+func (m *Manager) WithIdleSession(ctx context.Context, id string, action func() error) (bool, error) {
+	b, err := m.bindingFor(id)
+	if err != nil {
+		return false, err
+	}
+	select {
+	case b.sem <- struct{}{}:
+	default:
+		return false, nil
+	}
+	defer func() { <-b.sem }()
+	runs, err := m.cfg.Store.ListRuns(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	for _, run := range runs {
+		if !store.IsTerminal(run.Status) {
+			return false, nil
+		}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := action(); err != nil {
+		return false, err
+	}
+	// 本地暂停会关闭代理；主动丢弃旧连接，下一轮走重建并重新签发凭据。
+	if b.client != nil {
+		_ = b.client.Conn().Close()
+		b.client = nil
+	}
+	return true, nil
 }
