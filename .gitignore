@@ -13,13 +13,21 @@ kubeconfig*
 *credentials*
 !*.go
 secrets/
+.workbuddy/
 
 # ── Go ────────────────────────────────────────────
 /bin/
 /dist/
+# 构建产物如果被 `go build ./cmd/xxx` 落在仓库根，别再提交进 git
+#（历史上 astra-cli / admin-cli 两个 10MB 二进制被误提交过）。
+/astra-cli
+/admin-cli
+/astra-server
+/astra-sandbox
 
 # 运行时数据目录：数据库、jwt-secret、llm-key.json、沙箱工作区都落在这里。
-# 默认 <仓库>/data。不挡的话，新人跑一遍 make serve 再 git add 就把自己的密钥提交了。
+# 默认 ~/.astra/data（-data / ASTRA_DATA 可改）。不挡的话，新人跑一遍 make serve
+# 再 git add 就把自己的密钥提交了。
 /data/
 /data-*/
 *.db
