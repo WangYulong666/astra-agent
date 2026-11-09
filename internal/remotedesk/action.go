@@ -148,26 +148,37 @@ func (m *manager) doAction(ctx context.Context, res *ActionResult, args map[stri
 	}
 }
 
+// appLaunchArgv 只负责「拼 argv」，不执行。
+// 抽出来是为了让「参数是否分开传、有没有过 shell」可以被纯单测覆盖——
+// 执行体在 Linux CI 上缺 gtk-launch，只能跳到集成用例之外。
+func appLaunchArgv(goos, app string) (string, []string, error) {
+	switch goos {
+	case "darwin":
+		// 参数分开传：即使 app 里带空格/标点，也只会是 `open` 的一个 argv。
+		return "open", []string{"-a", app}, nil
+	case "linux":
+		return "gtk-launch", []string{app}, nil
+	default:
+		return "", nil, fmt.Errorf("%w: 平台 %s 暂不支持打开应用", ErrUnavailable, goos)
+	}
+}
+
 func (m *manager) actionOpenApp(ctx context.Context, res *ActionResult, name string) error {
 	app, err := validateAppName(name)
 	if err != nil {
 		return err
 	}
-	switch runtime.GOOS {
-	case "darwin":
-		// 参数分开传：即使 app 里带空格/标点，也只会是 `open` 的一个 argv。
-		if err := runCommand(ctx, "open", "-a", app); err != nil {
-			return fmt.Errorf("%w: 打开应用失败: %v", ErrUnavailable, err)
-		}
-	case "linux":
-		if _, err := exec.LookPath("gtk-launch"); err != nil {
+	bin, args, err := appLaunchArgv(runtime.GOOS, app)
+	if err != nil {
+		return err
+	}
+	if runtime.GOOS == "linux" {
+		if _, lerr := exec.LookPath(bin); lerr != nil {
 			return fmt.Errorf("%w: 未找到 gtk-launch，无法按名字启动应用（可改用 open_url）", ErrUnavailable)
 		}
-		if err := runCommand(ctx, "gtk-launch", app); err != nil {
-			return fmt.Errorf("%w: 打开应用失败: %v", ErrUnavailable, err)
-		}
-	default:
-		return unsupportedAction(res.Action)
+	}
+	if err := runCommand(ctx, bin, args...); err != nil {
+		return fmt.Errorf("%w: 打开应用失败: %v", ErrUnavailable, err)
 	}
 	res.Detail = "已打开 " + app
 	return nil

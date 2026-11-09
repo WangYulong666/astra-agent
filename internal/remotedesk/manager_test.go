@@ -571,14 +571,18 @@ func TestSessionTTLExpires(t *testing.T) {
 		t.Fatal("TTL 到期应记一次 remote.session.end")
 	}
 
-	// 没过期的不能被误杀。
-	d2 := r1Pair(t, env.m, "t1", "u1", "Mac 2")
-	s2, err := env.m.StartSession(ctx, StartRequest{TenantID: "t1", UserID: "u1", DeviceID: d2.ID, Mode: ModeView})
+	// 没过期的不能被误杀。这里必须换一个用**默认 TTL**（4h）的 manager：
+	// 上面那个把 SessionTTL 设成 30ms 是为了测过期，同一个 manager 上再建
+	// 「未过期」会话，CI 慢一点（store 落盘 + 调用耗时）就真过期了——
+	// Linux runner 上实测红过。
+	fresh := r1Open(t, nil)
+	d2 := r1Pair(t, fresh.m, "t1", "u1", "Mac 2")
+	s2, err := fresh.m.StartSession(ctx, StartRequest{TenantID: "t1", UserID: "u1", DeviceID: d2.ID, Mode: ModeView})
 	if err != nil {
 		t.Fatal(err)
 	}
-	env.m.sweepExpired()
-	alive, err := env.m.GetSession(ctx, "t1", s2.ID)
+	fresh.m.sweepExpired()
+	alive, err := fresh.m.GetSession(ctx, "t1", s2.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

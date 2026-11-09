@@ -156,6 +156,13 @@ func r1Record(t *testing.T) *[]r1Call {
 }
 
 func TestRunActionOpenAppPassesArgsWithoutShell(t *testing.T) {
+	// Linux CI 上没有 gtk-launch（也没有桌面环境），这条只能在本机/有桌面的
+	// 环境跑；argv 的纯逻辑由 TestAppLaunchArgv 兜住。
+	if runtime.GOOS == "linux" {
+		if _, err := exec.LookPath("gtk-launch"); err != nil {
+			t.Skip("无 gtk-launch（CI runner 没有桌面环境）")
+		}
+	}
 	env := r1Open(t, nil)
 	ctx := context.Background()
 	d := r1Pair(t, env.m, "t1", "u1", "Mac")
@@ -364,4 +371,28 @@ func r1ActiveSession(t *testing.T, env *r1Env, deviceID string) Session {
 		t.Fatalf("建会话失败: %v", err)
 	}
 	return s
+}
+
+// 纯逻辑：应用名只作为一个 argv，永不被 shell 解释。
+func TestAppLaunchArgv(t *testing.T) {
+	cases := []struct {
+		goos, app, bin string
+		args           []string
+	}{
+		{"darwin", "Visual Studio Code", "open", []string{"-a", "Visual Studio Code"}},
+		{"darwin", "Terminal; rm -rf ~", "open", []string{"-a", "Terminal; rm -rf ~"}},
+		{"linux", "code", "gtk-launch", []string{"code"}},
+	}
+	for _, c := range cases {
+		bin, args, err := appLaunchArgv(c.goos, c.app)
+		if err != nil {
+			t.Fatalf("%s/%s: %v", c.goos, c.app, err)
+		}
+		if bin != c.bin || len(args) != len(c.args) || args[len(args)-1] != c.args[len(c.args)-1] {
+			t.Fatalf("%s/%s: 得到 %s %v，期望 %s %v", c.goos, c.app, bin, args, c.bin, c.args)
+		}
+	}
+	if _, _, err := appLaunchArgv("windows", "cmd"); err == nil {
+		t.Fatal("不支持的平台应报错")
+	}
 }

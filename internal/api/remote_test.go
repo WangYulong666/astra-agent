@@ -754,11 +754,11 @@ func TestRemoteStreamWebSocket(t *testing.T) {
 	}
 
 	// 2. 服务端推两帧 → 客户端收到两条 binary，内容与顺序都要对。
+	//    注意必须「推一帧、读一帧」：订阅通道缓冲只有 1 且满则丢最旧（产品
+	//    设计如此，防慢客户端把抓屏泵拖死）。一次推两帧在 Linux CI 上会丢第 1 帧。
 	want := [][]byte{{0xff, 0xd8, 0x01, 0x11}, {0xff, 0xd8, 0x02, 0x22}}
-	for _, b := range want {
-		rt.frames <- remotedesk.Frame{JPEG: b, Width: 1280, Height: 720, At: time.Now()}
-	}
 	for i, wantBytes := range want {
+		rt.frames <- remotedesk.Frame{JPEG: wantBytes, Width: 1280, Height: 720, At: time.Now()}
 		typ, data = remoteWSRead(t, ctx, conn)
 		if typ != websocket.MessageBinary {
 			t.Fatalf("第 %d 帧应该是 binary，实际 %v", i+1, typ)
