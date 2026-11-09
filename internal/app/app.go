@@ -34,6 +34,7 @@ import (
 	"github.com/WangYulong666/astra-agent/internal/llmwire"
 	"github.com/WangYulong666/astra-agent/internal/memory"
 	"github.com/WangYulong666/astra-agent/internal/obs"
+	"github.com/WangYulong666/astra-agent/internal/remotedesk"
 	"github.com/WangYulong666/astra-agent/internal/runner"
 	"github.com/WangYulong666/astra-agent/internal/sandbox"
 	"github.com/WangYulong666/astra-agent/internal/store"
@@ -122,6 +123,8 @@ type Server struct {
 	stopAutoDistill func()
 	// 装配后期才确定的运行时信息，runner 持同一指针。
 	hints *runner.RuntimeHints
+	// remote 远程桌面；Close 时要先停它（抓屏子进程 + 会话记录）。
+	remote remotedesk.Manager
 	// tracer 是观测出口本体；stopTrace 只停事件桥，不关 worker，
 	// 退出前还要单独调 tracer.Close()（顺序见 Close）。可能是 Disabled 的空实现。
 	tracer trace.Tracer
@@ -407,6 +410,8 @@ func New(cfg Config) (*Server, error) {
 	insights, stopInsight := openInsights(lg, st, ledger, s.hub, cfg)
 	// 文档模块：手写文档随二进制分发 + 运行时生成的功能总览。
 	docsLib := openDocs(lg, cfg, caps, info)
+	s.remote = openRemote(lg, cfg)
+	remote := s.remote
 	s.stopInsight = stopInsight
 	// Start 之前控制面还没监听：url 置空，CreateSession 就不会注入一个
 	// 连不上的 ASTRA_SERVER。真正地址由 Start 用 normalizeLoopback 回填。
@@ -415,6 +420,7 @@ func New(cfg Config) (*Server, error) {
 	info["skills"] = boolLabel(skillHub != nil)
 	info["insights"] = boolLabel(insights != nil)
 	info["docs"] = boolLabel(docsLib != nil)
+	info["remote"] = boolLabel(remote != nil)
 
 	h, err := api.Handler(api.Config{
 		Manager: mgr, Store: st, Hub: s.hub, Provider: prov, Logger: lg,
@@ -432,6 +438,7 @@ func New(cfg Config) (*Server, error) {
 		Distiller: capa.Distiller, Connectors: capa.Connectors, Browsers: capa.Browsers,
 		Collab: coord, Ledger: ledger,
 		Capabilities: caps, SkillHub: skillHub, Insights: insights, Docs: docsLib,
+		Remote: remote,
 	})
 	if err != nil {
 		st.Close()
@@ -553,6 +560,10 @@ func (s *Server) Close() error {
 	}
 	if s.stopAutoDistill != nil {
 		s.stopAutoDistill()
+	}
+	// 远程桌面要最先停：它会拉起 screencapture 子进程，且必须在关存储前结束会话。
+	if s.remote != nil {
+		_ = s.remote.Close()
 	}
 	return s.st.Close()
 }

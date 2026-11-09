@@ -30,6 +30,7 @@ import (
 	"github.com/WangYulong666/astra-agent/internal/eventbus"
 	"github.com/WangYulong666/astra-agent/internal/insight"
 	"github.com/WangYulong666/astra-agent/internal/memory"
+	"github.com/WangYulong666/astra-agent/internal/remotedesk"
 	"github.com/WangYulong666/astra-agent/internal/runner"
 	"github.com/WangYulong666/astra-agent/internal/schedule"
 	"github.com/WangYulong666/astra-agent/internal/skillhub"
@@ -667,4 +668,38 @@ func openDocs(lg *log.Logger, cfg Config, caps capability.Registry,
 	}
 	lg.Printf("文档模块已启用（根目录 %s）", root)
 	return lib
+}
+
+// ── 远程桌面 ──────────────────────────────────────────────────
+
+// openRemote 装配远程桌面。
+//
+// 刻意「探测失败也返回非 nil」：能力不可用（缺屏幕录制/辅助功能权限）是常态，
+// 平台必须能启动并让 GET /v1/remote/capabilities 如实报告缺什么，
+// 而不是整个能力消失、用户不知道为什么坏了。
+func openRemote(lg *log.Logger, cfg Config) remotedesk.Manager {
+	if envBool("ASTRA_REMOTE_DISABLED", false) {
+		lg.Printf("远程桌面已被 ASTRA_REMOTE_DISABLED 关闭")
+		return nil
+	}
+	m, err := remotedesk.Open(remotedesk.Config{
+		DataDir: cfg.DataDir,
+		// 单机兼容模式（不强制认证）下不区分租户，与平台其它能力口径一致。
+		Tenancy: cfg.RequireAuth,
+		Logger:  lg,
+		Policy: remotedesk.Policy{
+			ControlNeedsApproval: true,
+		},
+		// 后台事件（配对被猜、会话 TTL 到期、吊销级联断开）只进日志；
+		// 用户主动动作由 API 层写审计表（那里才有 request 上下文）。
+		Audit: func(action, target string, detail map[string]any) {
+			lg.Printf("remote.%s %s %v", action, target, detail)
+		},
+	})
+	if err != nil {
+		lg.Printf("远程桌面未启用: %v", err)
+		return nil
+	}
+	lg.Printf("远程桌面已启用（数据 %s）", filepath.Join(cfg.DataDir, "remote"))
+	return m
 }

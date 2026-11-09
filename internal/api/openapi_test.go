@@ -151,6 +151,20 @@ var codeRoutes = []string{
 	"GET /v1/runs/{id}/activity",
 	"GET /v1/sessions/{id}/activity",
 
+	// 远程桌面（手机看/控电脑）
+	"GET /v1/remote/capabilities",
+	"POST /v1/remote/pairing",
+	"POST /v1/remote/pairing/claim",
+	"GET /v1/remote/devices",
+	"DELETE /v1/remote/devices/{id}",
+	"POST /v1/remote/sessions",
+	"GET /v1/remote/sessions",
+	"GET /v1/remote/sessions/{id}",
+	"POST /v1/remote/sessions/{id}/approve",
+	"DELETE /v1/remote/sessions/{id}",
+	"GET /v1/remote/sessions/{id}/stream",
+	"POST /v1/remote/sessions/{id}/actions",
+
 	// 文档模块（只读，随二进制分发）
 	"GET /v1/docs",
 	"GET /v1/docs/search",
@@ -692,6 +706,10 @@ func probeURL(p, method, sessID, doomedID, runID string) (string, bool) {
 	// 能力/技能单项查询的 {name}：能力未启用时 handler 回 503，启用时回 404，
 	// 两种都算「路由存在」。
 	// 文档路径是 {path...} 通配，探针填一个生成文档的路径即可。
+	// 远程桌面的 {id} 用假值：未启用 503、启用但不存在 404，都算路由存在。
+	// stream 是 WS 端点，非升级请求必须回 JSON 错误（见 remote_ws.go）。
+	case strings.HasPrefix(p, "/v1/remote/"):
+		return strings.ReplaceAll(p, "{id}", probeDummyID), true
 	case strings.HasPrefix(p, "/v1/docs/"):
 		return strings.ReplaceAll(p, "{path...}", "overview"), true
 	case strings.HasPrefix(p, "/v1/capabilities/"), p == "/v1/skills/{name}":

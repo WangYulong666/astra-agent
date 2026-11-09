@@ -31,6 +31,7 @@ import (
 	"github.com/WangYulong666/astra-agent/internal/insight"
 	"github.com/WangYulong666/astra-agent/internal/lifecycle"
 	"github.com/WangYulong666/astra-agent/internal/memory"
+	"github.com/WangYulong666/astra-agent/internal/remotedesk"
 	"github.com/WangYulong666/astra-agent/internal/runner"
 	"github.com/WangYulong666/astra-agent/internal/sandbox"
 	"github.com/WangYulong666/astra-agent/internal/schedule"
@@ -91,6 +92,8 @@ type Config struct {
 	Insights     insight.Store
 	// Docs 是内置文档库（含运行时生成的功能总览）。nil 时回 503。
 	Docs doclib.Library
+	// Remote 是远程桌面（手机看/控电脑）。nil 时回 503。
+	Remote remotedesk.Manager
 
 	TraceEndpoint     string
 	TraceDashboardURL string
@@ -232,6 +235,24 @@ func Handler(cfg Config) (http.Handler, error) {
 	// ── 行动账本（用户视角）─────────────────────────────────────
 	mux.HandleFunc("GET /v1/runs/{id}/activity", h.authed(h.runActivity, auth.ActionSessionRead))
 	mux.HandleFunc("GET /v1/sessions/{id}/activity", h.authed(h.sessionActivity, auth.ActionSessionRead))
+
+	// ── 远程桌面（手机看/控电脑）────────────────────────────────
+	// 权限复用现有动作，不新增权限常量：配对/建会话/快捷操作算写入(create)，
+	// 看画面与列表算读(read)，批准接管复用 approval:resolve，断开复用 delete。
+	// 归属（跨租户）由 handler 用 principal.TenantID 校验，不靠权限。
+	mux.HandleFunc("GET /v1/remote/capabilities", h.authed(h.remoteCapabilities, auth.ActionSessionRead))
+	mux.HandleFunc("POST /v1/remote/pairing", h.authed(h.remoteStartPairing, auth.ActionSessionCreate))
+	mux.HandleFunc("POST /v1/remote/pairing/claim", h.authed(h.remoteClaimPairing, auth.ActionSessionCreate))
+	mux.HandleFunc("GET /v1/remote/devices", h.authed(h.remoteListDevices, auth.ActionSessionRead))
+	mux.HandleFunc("DELETE /v1/remote/devices/{id}", h.authed(h.remoteRevokeDevice, auth.ActionSessionDelete))
+	mux.HandleFunc("POST /v1/remote/sessions", h.authed(h.remoteStartSession, auth.ActionSessionCreate))
+	mux.HandleFunc("GET /v1/remote/sessions", h.authed(h.remoteListSessions, auth.ActionSessionRead))
+	mux.HandleFunc("GET /v1/remote/sessions/{id}", h.authed(h.remoteGetSession, auth.ActionSessionRead))
+	mux.HandleFunc("POST /v1/remote/sessions/{id}/approve", h.authed(h.remoteApproveSession, auth.ActionApproval))
+	mux.HandleFunc("DELETE /v1/remote/sessions/{id}", h.authed(h.remoteEndSession, auth.ActionSessionDelete))
+	// 画面走 WebSocket，浏览器不能自定义 header → 复用一次性票据（同 SSE）。
+	mux.HandleFunc("GET /v1/remote/sessions/{id}/stream", h.authedEvents(h.remoteStream, auth.ActionSessionRead))
+	mux.HandleFunc("POST /v1/remote/sessions/{id}/actions", h.authed(h.remoteAction, auth.ActionSessionCreate))
 
 	// ── 文档模块（只读，随二进制分发）────────────────────────────
 	mux.HandleFunc("GET /v1/docs", h.authed(h.listDocs, auth.ActionSessionRead))

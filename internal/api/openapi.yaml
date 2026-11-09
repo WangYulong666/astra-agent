@@ -62,6 +62,8 @@ tags:
     description: "多 agent 协作：父 run 派生独立沙箱的子 agent 并等它回话。"
   - name: Activity
     description: "用户视角行动账本：做了什么、卡在哪、为什么停了。"
+  - name: Remote
+    description: "远程桌面：手机看/控电脑（监看、快捷操作、键鼠接管、审批与急停）。"
   - name: Docs
     description: "内置文档库：使用指南随二进制分发，功能总览运行时生成。"
   - name: Capabilities
@@ -2272,6 +2274,226 @@ paths:
       responses:
         "200":
           description: "文档全文。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/remote/capabilities:
+    get:
+      operationId: remote_capabilities
+      summary: "探测本机三层能力（监看/快捷操作/键鼠接管）与缺失原因。"
+      tags: [Remote]
+      responses:
+        "200":
+          description: "能力清单与屏幕尺寸。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/remote/pairing:
+    post:
+      operationId: remote_start_pairing
+      summary: "桌面端生成一次性配对码（6 位，默认 120 秒）。"
+      tags: [Remote]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "201":
+          description: "配对码、过期时间、二维码载荷。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/remote/pairing/claim:
+    post:
+      operationId: remote_claim_pairing
+      summary: "手机端用配对码绑定设备。"
+      tags: [Remote]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "201":
+          description: "设备记录（含 id）。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/remote/devices:
+    get:
+      operationId: remote_list_devices
+      summary: "列出本人已绑定设备。"
+      tags: [Remote]
+      responses:
+        "200":
+          description: "设备列表（含在线状态）。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/remote/devices/{id}:
+    delete:
+      operationId: remote_revoke_device
+      summary: "吊销设备：立即断开该设备的所有会话。"
+      tags: [Remote]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "设备或会话 id。"
+      responses:
+        "204":
+          description: "已吊销。"
+  /v1/remote/sessions:
+    post:
+      operationId: remote_start_session
+      summary: "开始会话；control 模式默认需桌面端批准。"
+      tags: [Remote]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "201":
+          description: "会话记录（status 可能是 pending_approval）。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    get:
+      operationId: remote_list_sessions
+      summary: "列出本租户会话。"
+      tags: [Remote]
+      responses:
+        "200":
+          description: "会话列表。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/remote/sessions/{id}:
+    get:
+      operationId: remote_get_session
+      summary: "取单个会话状态。"
+      tags: [Remote]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "设备或会话 id。"
+      responses:
+        "200":
+          description: "会话记录。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      operationId: remote_end_session
+      summary: "结束会话（任一方急停）。"
+      tags: [Remote]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "设备或会话 id。"
+      responses:
+        "204":
+          description: "已结束。"
+  /v1/remote/sessions/{id}/approve:
+    post:
+      operationId: remote_approve_session
+      summary: "桌面端批准接管（pending_approval → active）。"
+      tags: [Remote]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "设备或会话 id。"
+      responses:
+        "200":
+          description: "会话记录。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/remote/sessions/{id}/stream:
+    get:
+      operationId: remote_stream
+      summary: "WebSocket：接收 JPEG 帧、发送输入事件。需 ?ticket= 一次性票据。"
+      tags: [Remote]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "设备或会话 id。"
+      responses:
+        "101":
+          description: "协议升级为 WebSocket。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/remote/sessions/{id}/actions:
+    post:
+      operationId: remote_action
+      summary: "执行快捷操作（打开应用/网址、截屏、锁屏）。"
+      tags: [Remote]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: "设备或会话 id。"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: "操作结果。"
         "503":
           description: "能力未启用。"
           content:
