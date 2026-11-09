@@ -44,6 +44,9 @@ var knownCommands = []CommandSpec{
 	{"astra-cli", "skills show", `astra-cli skills show <名称> [--from DIR]`, "打印 SKILL.md 正文", []string{"skills"}},
 	{"astra-cli", "skills check", `astra-cli skills check [--from DIR]`, "校验每个 skill 的 requires，存在不可用项退出码 1", []string{"skills"}},
 	{"astra-cli", "skills install", `astra-cli skills install <名称> [--dest DIR] [--from DIR] [--force]`, "安装 skill 到本地目录", []string{"skills"}},
+	{"astra-cli", "skills drafts", `astra-cli skills drafts [--limit N]`, "列出 distill 待审草稿（走控制面）", []string{"skills"}},
+	{"astra-cli", "skills accept", `astra-cli skills accept <草稿ID>`, "接受草稿：落盘 + 刷新索引与能力注册表", []string{"skills"}},
+	{"astra-cli", "skills reject", `astra-cli skills reject <草稿ID>`, "拒绝草稿", []string{"skills"}},
 
 	// ── admin-cli：运营 / 运维侧 ────────────────────────────────
 	{"admin-cli", "login", `admin-cli login --server URL [--token T | --email E --password P] [--as admin]`, "登录并保存运营凭据", nil},

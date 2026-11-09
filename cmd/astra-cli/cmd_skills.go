@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/WangYulong666/astra-agent/internal/client"
 	"github.com/WangYulong666/astra-agent/internal/client/clikit"
@@ -37,9 +39,13 @@ const skillsHelp = `用法：
   astra-cli skills check [--from DIR]                          校验 requires，存在不可用项退出码 1
   astra-cli skills install <名称> [--dest DIR] [--from DIR] [--force]
                                                               安装到 SKILL_DIR/<名称>（未设则 ~/.astra/skills/<名称>）
+  astra-cli skills drafts [--limit N]                          列出 distill 待审草稿（走控制面）
+  astra-cli skills accept <草稿ID>                             接受草稿：落盘 + 刷新索引/能力注册表
+  astra-cli skills reject <草稿ID>                             拒绝草稿
 
 默认目录：SKILL_DIR 环境变量 > ~/.astra/skills > 仓库 skills/（向上 8 层）
 安装目标跟随 SKILL_DIR；名称只允许小写字母/数字、连字符分隔。
+drafts / accept / reject 需要控制面（--server / ASTRA_SERVER），其余四个只读本地目录。
 astra-cli 校验：ASTRA_CLI_BIN 指向可执行文件，或在 PATH 里能 LookPath 到 astra-cli
 `
 
@@ -53,6 +59,12 @@ func (a *app) cmdSkills(sub string, args []string) int {
 		return a.skillsCheck(args)
 	case "install":
 		return a.skillsInstall(args)
+	case "drafts", "pending":
+		return a.skillsDrafts(args)
+	case "accept":
+		return a.skillsAccept(args)
+	case "reject":
+		return a.skillsReject(args)
 	default:
 		if wantsHelp(args) || sub == "" {
 			fmt.Fprint(a.out, skillsHelp)
@@ -543,4 +555,99 @@ func astraCLIExecutable() bool {
 	}
 	info, err := os.Stat(p)
 	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
+}
+
+// ── 草稿人工闸门（走控制面）─────────────────────────────────
+//
+// 上面四个子命令都只读本地目录（SKILL_DIR），断网也能用；
+// 下面三个必须连控制面：草稿存在服务端，accept 会写盘并广播。
+
+// skillsDrafts 列出 distill 生成的待审草稿。
+func (a *app) skillsDrafts(args []string) int {
+	fs := a.newFlagSet("skills drafts")
+	limit := fs.Int("limit", 0, "最多返回几条（0 = 全部）")
+	_, code, done := a.parse(fs, args, clikit.BoolFlags("server", "token", "limit"))
+	if done {
+		return code
+	}
+	c, err := a.api()
+	if err != nil {
+		return a.fail(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	drafts, err := c.SkillDrafts(ctx, *limit)
+	if err != nil {
+		return a.fail(err)
+	}
+	return a.jsonOut(drafts, func() error {
+		if len(drafts) == 0 {
+			fmt.Fprintln(a.out, "没有待审草稿。成功 run（≥2 次工具调用）结束后会自动生成，见 DISTILL_AUTO。")
+			return nil
+		}
+		t := clikit.Table{Header: []string{"ID", "NAME", "STATUS", "CREATED", "DESCRIPTION"}}
+		for _, d := range drafts {
+			t.Rows = append(t.Rows, []string{
+				d.ID,
+				d.Name,
+				dash(d.Status),
+				d.CreatedAt.Local().Format("01-02 15:04"),
+				clikit.Trunc(d.Description, 48),
+			})
+		}
+		t.Render(a.out)
+		fmt.Fprintf(a.out, "\n共 %d 条；放行：astra-cli skills accept <ID>，拒绝：astra-cli skills reject <ID>\n", len(drafts))
+		return nil
+	})
+}
+
+// skillsAccept 接受一条草稿：服务端落盘 + 刷新 skills 索引与能力注册表。
+func (a *app) skillsAccept(args []string) int {
+	fs := a.newFlagSet("skills accept")
+	pos, code, done := a.parse(fs, args, clikit.BoolFlags("server", "token"))
+	if done {
+		return code
+	}
+	if err := a.needArgs(pos, 1, "astra-cli skills accept <草稿ID>"); err != nil {
+		return a.fail(err)
+	}
+	c, err := a.api()
+	if err != nil {
+		return a.fail(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	path, err := c.AcceptSkillDraft(ctx, pos[0])
+	if err != nil {
+		return a.fail(err)
+	}
+	return a.jsonOut(map[string]string{"path": path, "id": pos[0]}, func() error {
+		fmt.Fprintf(a.out, "已接受 %s → %s\n", pos[0], dash(path))
+		return nil
+	})
+}
+
+// skillsReject 拒绝一条草稿。服务端返回 204，成功时只回一行确认。
+func (a *app) skillsReject(args []string) int {
+	fs := a.newFlagSet("skills reject")
+	pos, code, done := a.parse(fs, args, clikit.BoolFlags("server", "token"))
+	if done {
+		return code
+	}
+	if err := a.needArgs(pos, 1, "astra-cli skills reject <草稿ID>"); err != nil {
+		return a.fail(err)
+	}
+	c, err := a.api()
+	if err != nil {
+		return a.fail(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := c.RejectSkillDraft(ctx, pos[0]); err != nil {
+		return a.fail(err)
+	}
+	return a.jsonOut(map[string]string{"id": pos[0], "status": "rejected"}, func() error {
+		fmt.Fprintf(a.out, "已拒绝 %s\n", pos[0])
+		return nil
+	})
 }

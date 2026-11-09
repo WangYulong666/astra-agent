@@ -453,3 +453,50 @@ func TestSkillsInstallOK(t *testing.T) {
 		}
 	})
 }
+
+// 草稿闸门的用法错误必须在本地就挡住（exit 2），不能等发到服务端才报。
+func TestSkillsAcceptRejectNeedDraftID(t *testing.T) {
+	for _, sub := range []string{"accept", "reject"} {
+		t.Run(sub, func(t *testing.T) {
+			cleanHome(t)
+			var out, errBuf bytes.Buffer
+			code := run([]string{"skills", sub}, &out, &errBuf)
+			if code != 2 {
+				t.Fatalf("exit = %d，期望 2；err=%s", code, errBuf.String())
+			}
+			if !strings.Contains(errBuf.String(), "草稿ID") {
+				t.Fatalf("错误信息应给出用法: %s", errBuf.String())
+			}
+		})
+	}
+}
+
+// 没有控制面地址时 drafts 要退 2（用法错误），而不是 1（疑似服务端故障）——
+// 两者的处置完全不同：前者去配 --server，后者去查服务。
+func TestSkillsDraftsWithoutServer(t *testing.T) {
+	cleanHome(t)
+	t.Setenv("ASTRA_SERVER", "")
+	t.Setenv("ASTRA_TOKEN", "")
+	var out, errBuf bytes.Buffer
+	code := run([]string{"skills", "drafts"}, &out, &errBuf)
+	if code != 2 {
+		t.Fatalf("exit = %d，期望 2；err=%s", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "服务端地址") {
+		t.Fatalf("错误信息应提示配置服务端: %s", errBuf.String())
+	}
+}
+
+// help 必须列出三个新子命令，否则 registry 与 help 两套说法会漂移。
+func TestSkillsHelpListsDraftGate(t *testing.T) {
+	cleanHome(t)
+	var out, errBuf bytes.Buffer
+	code := run([]string{"skills"}, &out, &errBuf)
+	_ = code
+	help := errBuf.String() + out.String()
+	for _, want := range []string{"skills drafts", "skills accept", "skills reject"} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("help 缺少 %q:\n%s", want, help)
+		}
+	}
+}
