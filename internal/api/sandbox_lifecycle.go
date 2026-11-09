@@ -35,6 +35,7 @@ type policyView struct {
 }
 
 type reportView struct {
+	Paused     int       `json:"paused"`
 	Scanned    int       `json:"scanned"`
 	Destroyed  int       `json:"destroyed"`
 	Orphaned   int       `json:"orphaned"`
@@ -74,6 +75,7 @@ func newReportView(r lifecycle.Report) reportView {
 	}
 	return reportView{
 		Scanned:    r.Scanned,
+		Paused:     r.Paused,
 		Destroyed:  r.Destroyed,
 		Orphaned:   r.Orphaned,
 		Expired:    r.Expired,

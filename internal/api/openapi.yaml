@@ -2956,10 +2956,12 @@ components:
 
     LifecycleReportView:
       type: object
-      description: "一轮清扫的结果。"
+      description: "一轮清扫的结果；paused 为保留文件的本地暂停数，destroyed 为销毁数。"
       required: [scanned, destroyed, orphaned, expired, idle, kept, errors, startedAt, finishedAt]
       properties:
         scanned:
+          type: integer
+        paused:
           type: integer
         destroyed:
           type: integer

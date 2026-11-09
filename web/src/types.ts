@@ -227,6 +227,7 @@ export type LifecyclePolicy = {
 }
 
 export type LifecycleReport = {
+  paused?: number
   scanned: number
   destroyed: number
   orphaned: number

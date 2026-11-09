@@ -105,8 +105,8 @@ func (r *Reaper) Run(ctx context.Context) {
 		}
 		// 每次扫描固定一行，便于用 grep 观察回收是否在工作。
 		// 即使 0 销毁也打：没有日志时无法区分「没东西可清」和「循环没起来」。
-		r.log.Printf("lifecycle: 扫描 %d，销毁 %d（孤儿 %d / 超龄 %d / 空闲 %d），保留 %d，错误 %d",
-			rep.Scanned, rep.Destroyed, rep.Orphaned, rep.Expired, rep.Idle, rep.Kept, len(rep.Errors))
+		r.log.Printf("lifecycle: 扫描 %d，暂停 %d，销毁 %d（孤儿 %d / 超龄 %d / 空闲 %d），保留 %d，错误 %d",
+			rep.Scanned, rep.Paused, rep.Destroyed, rep.Orphaned, rep.Expired, rep.Idle, rep.Kept, len(rep.Errors))
 
 		select {
 		case <-ctx.Done():
@@ -181,6 +181,8 @@ func (r *Reaper) Sweep(ctx context.Context) (rep Report, err error) {
 			//    注意：这里**只销毁沙箱**，会话记录照旧留着——Deleted 状态本身就是墓碑，
 			//    删掉记录会让审计和「这对话曾经存在」的事实一起消失。
 			reason = reasonOrphan
+		case info.State == sandbox.StatePaused || info.State == sandbox.StateStopped:
+			// 已释放运行资源，保留的数据不能在下一轮再次被当作过期资源删除。
 		case r.pol.MaxAge > 0 && !info.CreatedAt.IsZero() && now.Sub(info.CreatedAt) > r.pol.MaxAge:
 			// 3. 超龄：与活跃度无关的硬上限，兜底「挂着不关」和 agent 死循环。
 			reason = reasonExpired
@@ -195,13 +197,49 @@ func (r *Reaper) Sweep(ctx context.Context) (rep Report, err error) {
 			continue
 		}
 
-		if err := r.deps.Provider.Destroy(ctx, info.ID); err != nil && !isGone(err) {
-			// 单个失败不影响其它沙箱：继续扫描，把摘要留给调用方/日志。
-			rep.Errors = append(rep.Errors, fmt.Sprintf("%s（%s）: %v", info.ID, reason, err))
+		paused := false
+		reclaim := func() error {
+			// 本地会话的文件与运行环境在同一目录，必须暂停而不是 Destroy。
+			if suspend, ok := r.deps.Provider.(interface {
+				Suspend(context.Context, string) error
+			}); ok && reason != reasonOrphan {
+				if err := suspend.Suspend(ctx, info.ID); err != nil {
+					return err
+				}
+				paused = true
+				return nil
+			}
+			return r.deps.Provider.Destroy(ctx, info.ID)
+		}
+		acted, reclaimErr := true, error(nil)
+		if reason == reasonIdle {
+			acted, reclaimErr = r.withIdleSession(ctx, sess.ID, func() error {
+				// 取得执行锁之前可能刚结束一轮任务，重新读取活跃时间。
+				latest, err := r.deps.Store.GetSession(ctx, sess.ID)
+				if err != nil {
+					return err
+				}
+				if latest.Status != store.SessionActive || latest.LastActiveAt.IsZero() || now.Sub(latest.LastActiveAt) <= r.pol.IdleTimeout {
+					return errRecentlyActive
+				}
+				return reclaim()
+			})
+		} else {
+			reclaimErr = reclaim()
+		}
+		if errors.Is(reclaimErr, errRecentlyActive) || (!acted && reclaimErr == nil) {
+			rep.Kept++
 			continue
 		}
-
-		rep.Destroyed++
+		if reclaimErr != nil && !isGone(reclaimErr) {
+			rep.Errors = append(rep.Errors, fmt.Sprintf("%s（%s）: %v", info.ID, reason, reclaimErr))
+			continue
+		}
+		if paused {
+			rep.Paused++
+		} else {
+			rep.Destroyed++
+		}
 		switch reason {
 		case reasonOrphan:
 			rep.Orphaned++
@@ -229,4 +267,26 @@ func (r *Reaper) clock() time.Time {
 // 这种情形算清理成功：目标状态已达成，记成错误只会让报告里长期挂着一堆噪音。
 func isGone(err error) bool {
 	return errors.Is(err, sandbox.ErrNotFound)
+}
+
+var errRecentlyActive = errors.New("session became active during sweep")
+
+func (r *Reaper) withIdleSession(ctx context.Context, id string, action func() error) (bool, error) {
+	if r.deps.WithIdleSession != nil {
+		return r.deps.WithIdleSession(ctx, id, action)
+	}
+	// 独立使用回收器时仍检查未结束任务；app 额外注入 runner 的执行锁消除检查后的竞态。
+	runs, err := r.deps.Store.ListRuns(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	for _, run := range runs {
+		if !store.IsTerminal(run.Status) {
+			return false, nil
+		}
+	}
+	if err := action(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
