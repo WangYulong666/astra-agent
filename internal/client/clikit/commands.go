@@ -82,6 +82,17 @@ var knownCommands = []CommandSpec{
 	{"admin-cli", "logs billing", `admin-cli logs billing`, "本月账单", nil},
 	{"admin-cli", "logs insights", `admin-cli logs insights [--limit N] [--session ID]`, "失败 run 的结构化诊断与建议", []string{"insights"}},
 
+	{"admin-cli", "remote capabilities", `admin-cli remote capabilities [--strict]`, "远程桌面三层能力（监看/快捷操作/键鼠接管）", []string{"remote"}},
+	{"admin-cli", "remote pair", `admin-cli remote pair [--device NAME]`, "生成手机配对码（120 秒、一次性）", []string{"remote"}},
+	{"admin-cli", "remote claim", `admin-cli remote claim <code> [--device NAME]`, "用配对码把本机绑定为设备", []string{"remote"}},
+	{"admin-cli", "remote devices", `admin-cli remote devices`, "已绑定的设备列表（在线/最后活跃/已吊销）", []string{"remote"}},
+	{"admin-cli", "remote revoke", `admin-cli remote revoke <deviceID> [--yes]`, "吊销设备（级联断开其会话）", []string{"remote"}},
+	{"admin-cli", "remote start", `admin-cli remote start --device ID [--mode view|control]`, "建远程桌面会话（control 需桌面端确认）", []string{"remote"}},
+	{"admin-cli", "remote sessions", `admin-cli remote sessions [--limit 20]`, "会话列表（状态/帧率/掉帧/时长）", []string{"remote"}},
+	{"admin-cli", "remote approve", `admin-cli remote approve <sessionID>`, "批准键鼠接管", []string{"remote"}},
+	{"admin-cli", "remote end", `admin-cli remote end <sessionID>`, "急停：断开会话", []string{"remote"}},
+	{"admin-cli", "remote action", `admin-cli remote action <sessionID> <动作> [参数]`, "快捷操作（开 App/网址/截屏/锁屏）", []string{"remote"}},
+
 	{"admin-cli", "obs status", `admin-cli obs status`, "观测能力状态与所需环境变量", []string{"trace"}},
 	{"admin-cli", "obs traces", `admin-cli obs traces [--run RUN_ID] [--limit 20]`, "trace 反查", []string{"trace"}},
 

@@ -20,6 +20,7 @@ import { ActivityLedger } from './ActivityLedger'
 import { Capabilities } from './Capabilities'
 import { Insights } from './Insights'
 import { Docs } from './Docs'
+import { Remote } from './Remote'
 
 type Tab = { path: string; label: string; ownerOnly?: boolean }
 
@@ -41,6 +42,9 @@ const TABS: Tab[] = [
   // 文档紧跟能力注册表：一个是「平台有什么能力」，一个是「怎么用、为什么这么设计」，
   // 运维排障时通常在两者之间来回跳。
   { path: '/admin/docs', label: '文档' },
+  // 远程桌面紧跟文档：都不是「平台数据」，而是「这台机器本身的状态」——
+  // 排障时经常是从文档查到「要开哪个权限」，接着就来这一页看灯。
+  { path: '/admin/remote', label: '远程桌面' },
   { path: '/admin/insights', label: '失败诊断' },
   { path: '/admin/activity', label: '行动账本' },
   // 租户管理只有 owner 有权限（admin 的权限表里没有 tenant:manage），
@@ -76,6 +80,8 @@ export function AdminLayout({ path }: { path: string }) {
         return <Capabilities />
       case '/admin/docs':
         return <Docs />
+      case '/admin/remote':
+        return <Remote />
       case '/admin/insights':
         return <Insights />
       case '/admin/activity':

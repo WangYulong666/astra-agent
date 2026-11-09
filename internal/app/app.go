@@ -397,7 +397,16 @@ func New(cfg Config) (*Server, error) {
 		"activity":   boolLabel(ledger != nil),
 	}
 	// ── 自闭环装配：能力注册表 / 技能注册表 / 失败诊断 ──
-	// 放在 info 之后，因为 switches 直接复用同一份能力开关，避免两处漂移。
+	// 这几个能力「默认开启、可显式关掉」，它们的开关值必须先落进 info，
+	// 再拿 info 去建 switches 快照——否则注册表永远看不到 remote=off，
+	// ASTRA_REMOTE_DISABLED=1 时能力清单仍显示可用（实测踩过）。
+	s.remote = openRemote(lg, cfg)
+	remote := s.remote
+	insights, stopInsight := openInsights(lg, st, ledger, s.hub, cfg)
+	s.stopInsight = stopInsight
+	info["remote"] = boolLabel(remote != nil)
+	info["insights"] = boolLabel(insights != nil)
+
 	switches := make(map[string]bool, len(info))
 	for k, v := range info {
 		switches[k] = v == "on"
@@ -407,20 +416,19 @@ func New(cfg Config) (*Server, error) {
 	cliBin := ensureCLIBin(cfg, lg)
 	skillHub := openSkillHub(lg, cfg, s.hub, switches, cliBin)
 	caps := openCapabilityRegistry(lg, skillHub, switches)
-	insights, stopInsight := openInsights(lg, st, ledger, s.hub, cfg)
 	// 文档模块：手写文档随二进制分发 + 运行时生成的功能总览。
 	docsLib := openDocs(lg, cfg, caps, info)
-	s.remote = openRemote(lg, cfg)
-	remote := s.remote
-	s.stopInsight = stopInsight
 	// Start 之前控制面还没监听：url 置空，CreateSession 就不会注入一个
 	// 连不上的 ASTRA_SERVER。真正地址由 Start 用 normalizeLoopback 回填。
 	hints.Set(insights, "", cliBin)
+	// 这三个在 switches 之后才确定，用同一个 map 补进去：capabilitySources
+	// 持有的是 map 引用，Refresh 时能读到；首帧仍按「未知=不判不可用」处理。
 	info["capabilities"] = boolLabel(caps != nil)
 	info["skills"] = boolLabel(skillHub != nil)
-	info["insights"] = boolLabel(insights != nil)
 	info["docs"] = boolLabel(docsLib != nil)
-	info["remote"] = boolLabel(remote != nil)
+	switches["capabilities"] = caps != nil
+	switches["skills"] = skillHub != nil
+	switches["docs"] = docsLib != nil
 
 	h, err := api.Handler(api.Config{
 		Manager: mgr, Store: st, Hub: s.hub, Provider: prov, Logger: lg,

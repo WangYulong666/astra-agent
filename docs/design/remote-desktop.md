@@ -111,3 +111,39 @@ Wayland 下 `gnome-screenshot` 可用而 `import` 通常不行，探测时按平
 - 真机：L3 在本机应报 `permission_denied` 且前端明确提示，而不是静默失败
 - 前端 393px 不溢出，手势映射齐全，有截图
 - **如实标注**：L3 在本机无法端到端验证（TCC 不给），只能验证错误路径
+
+## 6. 实测结果（2026-11-10，Mac mini M4 / macOS 26.2）
+
+跑真二进制 + 真登录，不依赖任何桩：
+
+```
+GET  /v1/remote/capabilities
+     capture  available=true  backend=screencapture   1920×1080
+     input    available=false reason=permission_denied（TCC -10004）
+     actions  available=true  backend=open+pmset
+     screen   1600×900（"看起来像" 逻辑分辨率）  maxFps=10
+
+POST /v1/remote/pairing             → 959593，payload astra://remote/pair?code=...
+POST /v1/remote/pairing/claim       → dev_3b908cf3c3a6 / iPhone 16 / ios
+POST /v1/remote/sessions (view)     → active
+WS   .../stream?ticket=...          → hello + 24 帧 / 1.19MB（首帧 48KB JPEG，锁屏桌面，非黑屏）
+POST .../actions {screenshot}       → 1600x900，51046 字节，落 <data>/remote/shots/
+POST /v1/remote/sessions (control)  → pending_approval
+POST .../approve                    → active
+WS   input click                    → error: 能力不可用: permission_denied（不假装成功）
+```
+
+三个真机才暴露的坑（都已处理）：
+
+1. **全黑 ≠ 没授权**：显示器休眠时 `screencapture` 返回全黑 PNG（39KB），
+   和"没给屏幕录制权限"长得一样。`Reason` 改成两种可能都写，`make remote-check`
+   也按文件大小给"疑似休眠"提示；探测**不自动唤醒**（capabilities 会被轮询，
+   每 30 秒唤醒一次等于让显示器永远睡不着）。
+2. **单帧 200ms**：抓屏+解码+编码端到端 170–218ms，所以 `MaxFPS=10` 是上限不是保证，
+   实测 4.5–5fps。带宽按 5fps 估，不要按 10fps 算。
+3. **能力开关的装配顺序**：`switches` 快照早于 `info["remote"]` 赋值时，
+   `ASTRA_REMOTE_DISABLED=1` 后能力注册表仍显示 22 条全部可用。已改成先装配
+   remote/insights 再建快照，复测：开=22 条启用、关=0 条启用。
+
+已知边界（**未**验证）：L3 键鼠接管的成功路径在本机无法验证（TCC 不给辅助功能），
+只验证了错误路径；Linux 只做了交叉编译；多显示器/剪贴板/文件传输按 §0 不做。

@@ -4803,3 +4803,737 @@ kbd {
 }
 
 
+
+/* ═══ 远程桌面（remote） ════════════════════════════════════════
+   手机优先。393 下画面独占一屏（fixed 覆盖 admin 外壳），「立即断开」压在
+   底部拇指区；1440 下退成「左设备+会话 / 右画面」两栏。
+
+   颜色全部走变量，不写字面色：缺权限的三盏灯用中性灰（--muted）而不是
+   红色——那不是故障，是这台机器还没授权，红色会让人以为要重启服务。
+   唯一用红的地方是「断开/吊销」，那是破坏性操作，该红。 */
+
+.remote-page {
+  max-width: 1440px;
+}
+
+/* ── 1. 能力条 ─────────────────────────────────────────────── */
+
+.remote-caps {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.remote-caps-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.remote-caps-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-2);
+}
+.remote-lamps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.remote-lamp {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  min-width: 0;
+}
+.remote-lamp.on {
+  border-color: var(--border-2);
+}
+.remote-lamp-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 5px;
+  flex: none;
+  background: var(--muted);
+  opacity: 0.5;
+}
+.remote-lamp.on .remote-lamp-dot {
+  background: var(--green);
+  opacity: 1;
+  box-shadow: 0 0 0 3px var(--green-soft);
+}
+.remote-lamp-text {
+  min-width: 0;
+}
+.remote-lamp-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.remote-lamp-state {
+  font-size: 10.5px;
+  font-weight: 500;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.remote-lamp.on .remote-lamp-state {
+  color: var(--green);
+  border-color: var(--green-soft);
+}
+.remote-lamp-what {
+  margin-top: 2px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.remote-caps-notice {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-2);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.remote-fix > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--accent);
+}
+.remote-fix-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+}
+.remote-fix-row {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.remote-fix-key {
+  color: var(--muted);
+}
+.remote-fix-val {
+  overflow-wrap: anywhere;
+}
+.remote-fix-body p {
+  margin: 2px 0 0;
+  line-height: 1.7;
+}
+
+/* ── 2. 两栏骨架 ───────────────────────────────────────────── */
+
+.remote-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.remote-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.remote-main {
+  min-width: 0;
+}
+.remote-card .card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.remote-count {
+  font-family: var(--mono);
+  font-weight: 400;
+  color: var(--muted);
+}
+.remote-empty {
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--muted);
+}
+
+/* ── 3. 设备与会话列表 ─────────────────────────────────────── */
+
+.remote-devices,
+.remote-sessions {
+  display: flex;
+  flex-direction: column;
+}
+.remote-device,
+.remote-session {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px 14px;
+  border-top: 1px solid var(--border);
+}
+.remote-device:first-child,
+.remote-session:first-child {
+  border-top: none;
+}
+.remote-device.off {
+  opacity: 0.62;
+}
+.remote-device-top,
+.remote-session-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.remote-device-title {
+  font-size: 13px;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.remote-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--muted);
+  opacity: 0.45;
+}
+.remote-dot.on {
+  background: var(--green);
+  opacity: 1;
+}
+.remote-device-state {
+  font-size: 11px;
+  color: var(--muted);
+  flex: none;
+}
+.remote-device-meta,
+.remote-session-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.remote-device-actions,
+.remote-session-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+/* 吊销的说明行不该长得像按钮组 */
+.remote-device-actions.dim {
+  display: block;
+}
+
+/* 会话状态标签：语义色只用来区分「能控 / 等确认 / 已结束」。
+   等待用中性琥珀而不是红色——等电脑确认是一次正常流程。 */
+.remote-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-family: var(--mono);
+  border: 1px solid var(--border-2);
+  background: var(--panel-2);
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.remote-tag.ok {
+  color: var(--green);
+  border-color: var(--green-soft);
+  background: var(--green-soft);
+}
+.remote-tag.wait {
+  color: var(--amber);
+  border-color: var(--amber-soft);
+  background: var(--amber-soft);
+}
+.remote-tag.off,
+.remote-tag.dim {
+  color: var(--muted);
+}
+
+/* ── 4. 查看器 ─────────────────────────────────────────────── */
+
+.remote-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.remote-viewer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.remote-viewer-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.remote-device-name {
+  font-size: 14px;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.remote-readonly {
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--amber-soft);
+  background: var(--amber-soft);
+  color: var(--text);
+}
+.remote-note {
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text-2);
+}
+.remote-note.warn {
+  border-color: var(--red-soft);
+  background: var(--red-soft);
+  color: var(--text);
+}
+
+/* 画面区：canvas 的 CSS 尺寸完全由帧的宽高比决定（width:100%;height:auto），
+   不做 max-height / object-fit。理由：getBoundingClientRect 必须等于画面真正
+   占的区域，否则触摸坐标会偏——letterbox 之后 rect 比画面大一圈，点哪儿都偏。 */
+.remote-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  min-height: 180px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--t-sunken, var(--bg));
+}
+.remote-canvas-wrap {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.remote-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: var(--bg);
+  /* 长按选中/系统菜单会把「长按拖动」吃掉，画面上的文字也不需要选 */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-user-drag: none;
+  transform-origin: center center;
+  transition: transform 120ms ease-out;
+  /* 触摸全部交给我们：否则手机会把「拖动」当成页面滚动/下拉刷新 */
+  touch-action: none;
+}
+.remote-overlay {
+  position: absolute;
+  inset: auto 12px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border-2);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+.remote-overlay-title {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.remote-overlay-sub {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+/* 工具区 */
+.remote-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.remote-tier {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.remote-tools-label {
+  font-size: 11.5px;
+  color: var(--muted);
+  flex: none;
+}
+.remote-tier-seg .seg-item {
+  min-width: 40px;
+}
+/* 缩放按钮：只读模式下没有手势可用，放大只能靠它 */
+.remote-zoom {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+.remote-zoom .btn {
+  min-width: 34px;
+  padding: 0 8px;
+  font-family: var(--mono);
+}
+.remote-zoom-val {
+  min-width: 52px;
+  text-align: center;
+  font-size: 11.5px;
+  font-family: var(--mono);
+  color: var(--muted);
+}
+.remote-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.remote-input {
+  width: 118px;
+}
+.remote-input.wide {
+  flex: 1;
+  min-width: 0;
+  max-width: 320px;
+  width: auto;
+}
+.remote-action-msg {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+.remote-action-msg code {
+  overflow-wrap: anywhere;
+}
+.remote-keys {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.remote-keys-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: stretch;
+}
+.remote-text {
+  flex: 1;
+  min-width: 0;
+  min-height: 56px;
+  resize: vertical;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.remote-text:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.remote-send {
+  flex: none;
+  min-width: 76px;
+}
+.remote-toggle-on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* 底部状态条：手机靠它急停，所以永远是最后一块、永远可见。 */
+.remote-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: var(--radius);
+}
+.remote-status-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 12px;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.remote-status-metrics b {
+  color: var(--text);
+}
+.remote-drop {
+  color: var(--amber);
+}
+.remote-status-conn {
+  color: var(--text-2);
+}
+/* 红底配深字：--red 在两套主题里都是亮红，深色字的对比度是稳定的，
+   而 var(--bg) 在浅色主题下会变成白字压亮红（2.2:1，读不清）。 */
+.remote-disconnect {
+  flex: none;
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: 10px;
+  background: var(--red);
+  color: #170a0a;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+.remote-disconnect:active {
+  opacity: 0.86;
+}
+
+/* 空态说明：手势表放在这里，因为「怎么用」比「这里什么都没有」有用。 */
+.remote-placeholder-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.remote-hints {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+.remote-hints b {
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+/* ── 5. 配对弹层 ───────────────────────────────────────────── */
+
+.remote-pair {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.remote-code {
+  font-family: var(--mono);
+  font-size: 40px;
+  line-height: 1.2;
+  letter-spacing: 6px;
+  text-align: center;
+  padding: 14px 8px;
+  border-radius: 12px;
+  border: 1px dashed var(--border-2);
+  background: var(--panel-2);
+  font-variant-numeric: tabular-nums;
+  user-select: all;
+}
+.remote-code.off {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+.remote-pair-count {
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.remote-pair-steps {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-2);
+}
+.remote-deeplink {
+  display: block;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.remote-pair-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.remote-claim > summary {
+  cursor: pointer;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.remote-claim-body {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.remote-claim-body .input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── 6. 桌面两栏 ───────────────────────────────────────────── */
+
+@media (min-width: 1024px) {
+  .remote-grid {
+    grid-template-columns: 340px minmax(0, 1fr);
+    gap: 16px;
+  }
+  /* 右栏跟随滚动：手机那一屏在看画面时不会往下翻列表，
+     但桌面浏览器会——把画面钉住比让它滚走有用。 */
+  .remote-main {
+    position: sticky;
+    top: 0;
+  }
+  /* 画面高度上限 = 视口的一部分：不这么做的话 900 高的窗口里
+     「画质/快捷按钮/键盘」全被挤到折叠线以下，状态条还会压住它们。
+     两个 max-* 一起用，canvas 会按帧的宽高比等比缩，rect 依旧等于画面本身。 */
+  .remote-stage {
+    /* 画面占视口的一小半：右栏整体（画面 + 画质 + 快捷按钮 + 键盘 + 状态条）
+       在 900 高的窗口里略高于首屏，往下滚一点就整块可见——右栏是 sticky 的，
+       滚动后画面会钉在顶部，不会跟着列表滚走。 */
+    height: 42vh;
+    min-height: 280px;
+  }
+  .remote-canvas {
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    max-height: 100%;
+  }
+}
+
+/* ── 7. 手机：画面独占一屏，断开压在拇指区 ────────────────── */
+
+@media (max-width: 1023px) {
+  .remote-page {
+    max-width: none;
+  }
+  /* 三盏灯在窄屏竖排：并排会把「缺什么」压成两行截断 */
+  .remote-lamps {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* 触摸目标 ≥44px（iOS HIG 的下限）。.btn.small 桌面是 28px，手机上一律放大。 */
+  .remote-page .btn,
+  .remote-page .btn.small,
+  .remote-viewer .btn,
+  .remote-viewer .btn.small {
+    min-height: 44px;
+    padding: 0 12px;
+  }
+  .remote-page .input,
+  .remote-viewer .input {
+    min-height: 44px;
+  }
+  .remote-page .seg-item {
+    min-height: 44px;
+  }
+  .remote-viewer {
+    /* fixed 覆盖 admin 外壳（顶栏 52 + tab 条都不需要了，全屏给画面）。
+       z-index 低于弹层（40），配对弹层仍然能盖在它上面。 */
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    padding: 10px 12px calc(96px + env(safe-area-inset-bottom));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: var(--bg);
+  }
+  .remote-status {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 31;
+    border-radius: 0;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+    padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+  }
+  .remote-disconnect {
+    min-height: 48px;
+    padding: 0 20px;
+    font-size: 14px;
+  }
+  .remote-status-metrics {
+    max-width: 60%;
+    gap: 2px 10px;
+  }
+  .remote-code {
+    font-size: 34px;
+    letter-spacing: 4px;
+  }
+  .remote-input {
+    width: 100px;
+  }
+  /* 手机窄屏：页头按钮按内容宽度靠左，别拉成一条通栏 */
+  .remote-page .page-head .page-act {
+    align-self: flex-start;
+  }
+  .remote-text {
+    flex: 1 1 100%;
+    min-height: 64px;
+  }
+  .remote-send {
+    flex: 1 1 100%;
+    min-height: 44px;
+  }
+}

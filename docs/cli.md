@@ -241,6 +241,45 @@ admin-cli logs billing                                 # 本月账单
 常用的组合：先 `logs activity <runID>` 看用户视角的时间线，觉得哪一步可疑
 再 `logs history <runID>` 翻原始事件，最后 `logs egress` 对照出网记录。
 
+### 远程桌面（`remote`）
+
+手机看/控这台电脑。命令只做「电脑跟前的那个人」能做的事：出配对码、看设备、
+批准接管、急停；画面与手势在手机上（WebSocket + JPEG 帧），命令行不碰。
+用户向说明见 [`docs/remote-desktop.md`](./remote-desktop.md)。
+
+```bash
+admin-cli remote capabilities [--strict]              # 三层能力：监看 / 快捷操作 / 键鼠接管
+admin-cli remote pair [--device NAME]                 # 6 位配对码（120 秒、一次性）
+admin-cli remote claim <code> [--device NAME]         # 用配对码把本机绑成设备（脚本/手机侧）
+admin-cli remote devices                              # 设备列表：在线 / 最后活跃 / 已吊销
+admin-cli remote revoke <deviceID> [--yes]            # 吊销设备（级联断开其会话）
+admin-cli remote start --device ID [--mode view|control]
+admin-cli remote sessions [--limit 20]                # 状态 / 帧率 / 掉帧 / 时长
+admin-cli remote approve <sessionID>                  # 批准接管（pending → active）
+admin-cli remote end <sessionID>                      # 急停：立即断开
+admin-cli remote action <sessionID> <动作> [参数]      # open-app / open-url / screenshot / lock
+```
+
+- **退出码**：只有「监看不可用」算失败（`1`）——没有画面这个能力就不存在。
+  快捷操作 / 键鼠接管不可用只是降级（只读模式），返回 `0`；加 `--strict`
+  则任意一层不可用都返回 `1`，给部署自检用。
+- `capabilities` 的输出是三层各一行：能用的打 `OK`（附后端名），
+  不能用的打原因 **和修复路径**（例如「系统设置 → 隐私与安全 → 辅助功能」）。
+- `pair` 把 `payload` 单独一行输出，方便复制给二维码工具或原生 App 深链。
+- `start --mode control` 默认落在 `pending_approval`，CLI 会直接打印
+  「等待桌面确认」并给出 `remote approve` 提示；批准前手机只能看画面。
+- `action` 的动作名是 CLI 侧的连字符写法，映射到协议的下划线值：
+  `open-app`→`open_app`（参数是应用名）、`open-url`→`open_url`（仅 http/https）、
+  `screenshot`（返回电脑上的落盘路径）、`lock`。
+- `end` 是急停，**不做二次确认**（它存在的场景就是「现在必须断」）；
+  `revoke` 会断开会话，所以要确认，`--yes` / `--json` 跳过。
+- 时间列一律 UTC 并在表头标注，`formatTime` 输出带 `UTC` 字样，不会被本地时区平移。
+- 能力未启用（`ASTRA_REMOTE_DISABLED=1` 或装配失败）时服务端回 503，
+  CLI 原样显示原因，不会伪装成「空列表」。
+
+电脑端的自检用 `make remote-check`：抓屏 / 注入 / 控制面能力接口三行，
+抓屏不可用返回 1，注入不可用只记警告。
+
 ## 5. 脚本化
 
 ```bash
@@ -259,6 +298,10 @@ admin-cli audit tail --limit 1000 --json > audit.json
 # 出网拒绝记录 + 某个 run 的完整事件流
 admin-cli logs egress --limit 500 --json > egress.json
 admin-cli logs history "$RUN" --json > events.json
+
+# 远程桌面：先确认本机能看能控，再给手机出码
+admin-cli remote capabilities --strict --json | jq '.capture.available'
+admin-cli remote pair --json | jq -r .code
 ```
 
 `--json` 输出的就是服务端原样结构，字段名不加壳、不改名——脚本依赖的

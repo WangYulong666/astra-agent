@@ -149,6 +149,16 @@ export const api = {
 
 // ── 身份 ─────────────────────────────────────────────────────
 
+/**
+ * 换一张一次性事件流票据（60 秒、scope=sse、用一次即废）。
+ *
+ * WebSocket 与 EventSource 都不能带 Authorization 头，所以实时通道统一走这里：
+ * 登录态 POST 换票 → 把票放在 URL 上。票据只能证明「这个请求来自已登录用户」，
+ * 真正的归属校验在服务端按 run/session 再做一次。
+ */
+export const sseTicket = () =>
+  request<{ ticket: string; expiresAt: string }>('/v1/auth/sse-ticket', { method: 'POST' })
+
 export const authApi = {
   login: (body: { tenant: string; email: string; password: string }) =>
     request<LoginResponse>(
@@ -747,4 +757,158 @@ export const docApi = {
     request<DocsSearchResponse>(
       `/v1/docs/search?q=${encodeURIComponent(q)}&limit=${limit}`,
     ),
+}
+
+// ── 远程桌面（手机看/控电脑）────────────────────────────────────
+//
+// 字段与 internal/remotedesk 的 json tag 逐字对应（camelCase），不做映射层。
+// 能力是分层的：capture / actions / input 各自回 available，缺权限时
+// 不报错、只把 reason 与 hint 写清楚。前端据此决定「能不能控」，
+// 不做第二套探测（否则前后端会各说一套）。
+//
+// 未启用时所有 /v1/remote/* 回 503 + {error}（Remote 为 nil 或
+// ASTRA_REMOTE_DISABLED=1），页面据此显示「未启用」，不画空列表。
+
+export type RemoteCapability = {
+  available: boolean
+  backend?: string
+  /** 不可用的原因，例如「System Events 权限违例 (-10004)」。 */
+  reason?: string
+  /** 可执行的修复动作，例如「系统设置 → 隐私与安全 → 辅助功能」。 */
+  hint?: string
+}
+
+export type RemoteCapabilities = {
+  platform: string
+  capture: RemoteCapability
+  input: RemoteCapability
+  actions: RemoteCapability
+  screen: { width: number; height: number }
+  maxFps: number
+  /** 给人看的一句话总结。 */
+  notice?: string
+}
+
+export type RemotePairing = {
+  /** 6 位数字。一次性、默认 120 秒。 */
+  code: string
+  expiresAt: string
+  /** 二维码内容；前端不画 QR（不引依赖），只用于复制。 */
+  payload: string
+  /** 原生 App 深链，如 astra://remote/pair?code=123456&server=… */
+  deepLink?: string
+}
+
+export type RemoteDevice = {
+  id: string
+  name: string
+  platform: string
+  createdAt: string
+  lastSeenAt: string
+  revokedAt?: string
+  online: boolean
+}
+
+export type RemoteStats = {
+  fps: number
+  width: number
+  height: number
+  quality: number
+  frames: number
+  dropped: number
+  inputs: number
+}
+
+export type RemoteSession = {
+  id: string
+  deviceId: string
+  device?: string
+  mode: 'view' | 'control'
+  status: 'pending_approval' | 'active' | 'ended' | 'denied' | 'expired'
+  createdAt: string
+  expiresAt: string
+  approvedAt?: string
+  endedAt?: string
+  endReason?: string
+  client?: string
+  stats: RemoteStats
+}
+
+export type RemoteActionName = 'screenshot' | 'lock' | 'open_app' | 'open_url'
+
+export type RemoteActionResult = {
+  action: string
+  ok: boolean
+  detail?: string
+  /** screenshot 落盘路径。 */
+  path?: string
+}
+
+/** 会话列表接口的形状在契约里没钉死（数组或 {items}），两种都收。 */
+function sessionList(body: RemoteSession[] | { items?: RemoteSession[] }): RemoteSession[] {
+  return Array.isArray(body) ? body : body?.items || []
+}
+
+export const remoteApi = {
+  capabilities: () => request<RemoteCapabilities>('/v1/remote/capabilities'),
+
+  startPairing: (device?: string) =>
+    request<RemotePairing>('/v1/remote/pairing', {
+      method: 'POST',
+      body: JSON.stringify(device ? { device } : {}),
+    }),
+
+  /** 手机端认领配对码（这一页一般用不到，留给 App/CLI 共用）。 */
+  claimPairing: (body: { code: string; device?: string; platform?: string }) =>
+    request<RemoteDevice>('/v1/remote/pairing/claim', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  devices: () => request<{ items: RemoteDevice[] }>('/v1/remote/devices'),
+
+  revokeDevice: (id: string) =>
+    request<void>(`/v1/remote/devices/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  startSession: (body: { deviceId: string; mode: 'view' | 'control'; client?: string }) =>
+    request<RemoteSession>('/v1/remote/sessions', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  sessions: async () =>
+    sessionList(
+      await request<RemoteSession[] | { items?: RemoteSession[] }>('/v1/remote/sessions'),
+    ),
+
+  getSession: (id: string) =>
+    request<RemoteSession>(`/v1/remote/sessions/${encodeURIComponent(id)}`),
+
+  /** 桌面端批准接管。手机端调它是「代批准」，正常流程应在电脑上点。 */
+  approveSession: (id: string) =>
+    request<RemoteSession>(`/v1/remote/sessions/${encodeURIComponent(id)}/approve`, {
+      method: 'POST',
+    }),
+
+  endSession: (id: string) =>
+    request<void>(`/v1/remote/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  action: (id: string, action: RemoteActionName, args: Record<string, string> = {}) =>
+    request<RemoteActionResult>(
+      `/v1/remote/sessions/${encodeURIComponent(id)}/actions`,
+      { method: 'POST', body: JSON.stringify({ action, args }) },
+    ),
+}
+
+/**
+ * 画面流地址。同源，跟着页面协议走（https 页面必须用 wss，否则浏览器直接拒连）。
+ *
+ * 注意：WS 不支持自定义头，所以票只能挂在 query 上；票是一次性的，
+ * 每次重连都要重新 POST /v1/auth/sse-ticket 换一张。
+ */
+export function remoteStreamUrl(sessionId: string, ticket: string): string {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${proto}//${window.location.host}/v1/remote/sessions/${encodeURIComponent(
+    sessionId,
+  )}/stream?ticket=${encodeURIComponent(ticket)}`
 }

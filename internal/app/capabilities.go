@@ -340,6 +340,14 @@ func (c capabilitySources) Collect(ctx context.Context) ([]capability.Spec, erro
 				enabled = false
 			}
 		}
+		// env 为空的能力（remote/docs/capabilities 这类默认开启、可显式关掉的）
+		// 光看 env 会永远判「可用」。开关才是权威：ASTRA_REMOTE_DISABLED=1 时
+		// /v1/meta 的 remote=off，这里必须跟着变不可用。
+		if sw, ok := tagToSwitch[r.Tag]; ok {
+			if v, exists := c.switches[sw]; exists && !v {
+				enabled = false
+			}
+		}
 		out = append(out, capability.Spec{
 			Name: r.OperationID, Kind: "api", Description: r.Summary,
 			Endpoint: r.Method + " " + r.Path, Source: "openapi",
@@ -352,7 +360,10 @@ func (c capabilitySources) Collect(ctx context.Context) ([]capability.Spec, erro
 		enabled := true
 		for _, req := range cmd.Requires {
 			env = append(env, switchToEnv[req]...)
-			if c.switches[req] == false && len(switchToEnv[req]) > 0 {
+			// 只要这个开关在 switches 里且为 false 就不可用；
+			// 之前要求「该能力有必填 env」才判，导致 remote/scheduler 这类
+			// 默认开启的能力关掉后仍显示可用。
+			if v, exists := c.switches[req]; exists && !v {
 				enabled = false
 			}
 		}
@@ -391,6 +402,20 @@ var switchToEnv = map[string][]string{
 	"browser":    {},
 	"collab":     {},
 	"activity":   {},
+	"remote":     {},
+}
+
+// tagToSwitch 把 openapi 的 tag 映射到 /v1/meta 的能力开关名。
+// 没列到的 tag 视为「无能力依赖」（会话、run、审批等核心端点）。
+var tagToSwitch = map[string]string{
+	"Memory":        "memory",
+	"Observability": "trace",
+	"Egress":        "egress",
+	"Connectors":    "connectors",
+	"Remote":        "remote",
+	"Insights":      "insights",
+	"Capabilities":  "capabilities",
+	"Docs":          "docs",
 }
 
 var envToSwitch = map[string]string{

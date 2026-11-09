@@ -85,6 +85,8 @@ func run(args []string, out, errW io.Writer, in io.Reader) int {
 		return a.cmdAudit(sub, rest)
 	case "logs":
 		return a.cmdLogs(sub, rest)
+	case "remote":
+		return a.cmdRemote(sub, rest)
 	case "obs":
 		return a.cmdObs(sub, rest)
 	case "memory":
@@ -98,7 +100,8 @@ func run(args []string, out, errW io.Writer, in io.Reader) int {
 
 var knownCommands = map[string]bool{
 	"login": true, "whoami": true, "tenant": true, "user": true, "quota": true,
-	"key": true, "sandbox": true, "audit": true, "logs": true, "obs": true, "memory": true,
+	"key": true, "sandbox": true, "audit": true, "logs": true, "remote": true,
+	"obs": true, "memory": true,
 	"version": true, "help": true, "-h": true, "--help": true, "--version": true,
 }
 
@@ -106,7 +109,7 @@ var knownCommands = map[string]bool{
 // 否则 `user reset-password <id>` 里的 id 会被当成子命令吃掉。
 var groupCommands = map[string]bool{
 	"tenant": true, "user": true, "quota": true, "key": true,
-	"sandbox": true, "audit": true, "logs": true, "obs": true, "memory": true,
+	"sandbox": true, "audit": true, "logs": true, "remote": true, "obs": true, "memory": true,
 }
 
 // splitCommand 与 astra-cli 同构：从左扫到第一个已知命令名作为锚点，
@@ -282,6 +285,14 @@ func (a *app) printMainHelp() {
   logs usage [--from T] [--to T] [--limit N] [--user ID]    用量流水
   logs billing                                              本月账单
   logs insights [--limit N] [--session ID]                  失败 run 的结构化诊断与建议
+  remote capabilities [--strict]                            远程桌面三层能力（监看/快捷操作/键鼠接管）
+  remote pair [--device NAME]                               生成手机配对码（120 秒、一次性）
+  remote devices                                            已绑定的手机/设备
+  remote start --device ID [--mode view|control]            建远程桌面会话
+  remote sessions [--limit 20]                              会话列表（状态/帧率/掉帧）
+  remote approve <sessionID>                                批准键鼠接管
+  remote end <sessionID>                                    急停断开
+  remote action <sessionID> <动作> [参数]                    快捷操作（开 App/网址/截屏/锁屏）
   obs status                                                 观测能力状态与所需变量
   obs traces [--run RUN_ID] [--limit 20]                     trace 反查
   memory stats [--tenant ID]                                 记忆只读统计（不含内容）

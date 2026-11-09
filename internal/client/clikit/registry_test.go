@@ -40,6 +40,7 @@ var allowedRequires = map[string]bool{
 	"memory": true, "trace": true, "egress": true, "connectors": true,
 	"scheduler": true, "distill": true, "browser": true, "collab": true,
 	"activity": true, "capabilities": true, "skills": true, "insights": true,
+	"remote": true,
 }
 
 func isMetaWord(w string) bool {

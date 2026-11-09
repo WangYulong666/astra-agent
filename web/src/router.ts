@@ -23,6 +23,8 @@ export const ROUTES = [
   '/admin/insights',
   // 内置文档：功能总览 + 使用指南 + 设计/决策记录，随二进制分发、离线可读
   '/admin/docs',
+  // 手机看/控电脑：运维不在跟前时的最后一条路
+  '/admin/remote',
   '/admin/tenants',
   '/admin/settings',
 ] as const

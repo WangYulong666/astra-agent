@@ -416,3 +416,141 @@ loop-check: ## 检查自闭环前提（CLI 可执行 / skills 可读 / 能力接
 	  printf '\033[32m全部前提就绪\033[0m\n'; \
 	fi; \
 	exit 0
+
+# 远程桌面自检：抓屏 / 注入 / 控制面能力接口。
+#
+# 为什么单独一个目标：这三件事坏了的症状全都是「手机上是黑屏 / 点了没反应」，
+# 而它们要的权限完全不同——屏幕录制（TCC）、辅助功能（TCC）、反代 WS（部署）。
+# doctor 管的是沙箱与自闭环，管不到 TCC，所以单独给一条命令，一条命令说清缺哪一层。
+#
+# 判据：
+#   抓屏不可用 → exit 1（没有画面，这个能力就不存在）；
+#   注入不可用 → 只警告（只读模式是设计内的降级，不该让 CI 变红）；
+#   控制面未起 / 未设 token → 只提示，不影响退出码。
+.PHONY: remote-check
+remote-check: ## 检查远程桌面三层能力（抓屏 / 注入 / 控制面）
+	@if [ "$${ASTRA_REMOTE_DISABLED:-}" = "1" ]; then \
+	  printf '\033[1m远程桌面自检\033[0m\n\n'; \
+	  printf '\033[33m已关闭\033[0m  ASTRA_REMOTE_DISABLED=1：全局急停生效，/v1/remote/* 一律 503，三层能力不必再查\n'; \
+	  exit 0; \
+	fi; \
+	os=$$(uname -s); arch=$$(uname -m); \
+	tmp="$${TMPDIR:-/tmp}/astra-remote-shot-$$$$.png"; \
+	cap_ok=0; cap_tag='\033[31m不可用\033[0m'; cap_note=''; \
+	if [ "$$os" = "Darwin" ]; then \
+	  if command -v screencapture >/dev/null 2>&1; then \
+	    if screencapture -x -t png "$$tmp" >/dev/null 2>&1 && [ -s "$$tmp" ]; then \
+	      size=$$(wc -c < "$$tmp" | tr -d ' '); \
+	      w=$$(sips -g pixelWidth "$$tmp" 2>/dev/null | awk '/pixelWidth/{print $$2}'); \
+	      h=$$(sips -g pixelHeight "$$tmp" 2>/dev/null | awk '/pixelHeight/{print $$2}'); \
+	      if [ "$$size" -ge 8192 ]; then \
+	        cap_ok=1; cap_tag='\033[32mOK    \033[0m'; \
+	        cap_note="screencapture · $${w}×$${h} · $${size} 字节"; \
+	      elif [ "$$size" -ge 5120 ]; then \
+	        cap_ok=1; cap_tag='\033[33m可疑  \033[0m'; \
+	        cap_note="screencapture · $${w}×$${h} · 仅 $${size} 字节：可能显示器休眠，或未授予「屏幕录制」权限"; \
+	      else \
+	        cap_note="screencapture 只产出 $${size} 字节（疑似全黑）：显示器休眠，或未授予「屏幕录制」权限"; \
+	      fi; \
+	    else \
+	      cap_note='screencapture 执行失败：系统设置 → 隐私与安全 → 屏幕录制，勾选运行它的程序后重试'; \
+	    fi; \
+	  else \
+	    cap_note='没有 screencapture（非 macOS 环境）'; \
+	  fi; \
+	elif [ "$$os" = "Linux" ]; then \
+	  tool=''; \
+	  for c in gnome-screenshot scrot import; do \
+	    if command -v $$c >/dev/null 2>&1; then tool=$$c; break; fi; \
+	  done; \
+	  if [ -z "$$tool" ]; then \
+	    cap_note='gnome-screenshot / scrot / import 均未安装：apt install gnome-screenshot（Wayland 优先）或 scrot（X11）'; \
+	  else \
+	    grabbed=0; \
+	    if [ "$$tool" = gnome-screenshot ]; then \
+	      gnome-screenshot -f "$$tmp" >/dev/null 2>&1 && grabbed=1; \
+	    elif [ "$$tool" = scrot ]; then \
+	      scrot -o "$$tmp" >/dev/null 2>&1 && grabbed=1; \
+	    else \
+	      import -window root "$$tmp" >/dev/null 2>&1 && grabbed=1; \
+	    fi; \
+	    size=0; \
+	    if [ -f "$$tmp" ]; then size=$$(wc -c < "$$tmp" | tr -d ' '); fi; \
+	    if [ $$grabbed -eq 1 ] && [ "$$size" -ge 8192 ]; then \
+	      cap_ok=1; cap_tag='\033[32mOK    \033[0m'; cap_note="$$tool · $${size} 字节"; \
+	    elif [ $$grabbed -eq 1 ] && [ "$$size" -ge 5120 ]; then \
+	      cap_ok=1; cap_tag='\033[33m可疑  \033[0m'; \
+	      cap_note="$$tool · 仅 $${size} 字节：可能显示器休眠或画面全黑"; \
+	    else \
+	      cap_note="$$tool 抓屏失败：Wayland 下 import 通常不可用，优先 gnome-screenshot；同时确认有可用的 X/Wayland 会话"; \
+	    fi; \
+	  fi; \
+	else \
+	  cap_note="$$os 没有抓屏后端（目前支持 macOS / Linux）"; \
+	fi; \
+	inj_ok=0; inj_tag='\033[33m不可用\033[0m'; inj_note=''; \
+	if command -v cliclick >/dev/null 2>&1; then \
+	  inj_ok=1; inj_tag='\033[32mOK    \033[0m'; inj_note="cliclick · $$(command -v cliclick)"; \
+	elif [ "$$os" = "Darwin" ] && command -v osascript >/dev/null 2>&1; then \
+	  out=$$(osascript -e 'tell application "System Events" to get UI elements enabled' 2>&1 || true); \
+	  if [ "$$out" = "true" ]; then \
+	    inj_ok=1; inj_tag='\033[32mOK    \033[0m'; inj_note='osascript · 辅助功能已授权'; \
+	  elif [ "$$out" = "false" ]; then \
+	    inj_note='辅助功能未勾选：系统设置 → 隐私与安全 → 辅助功能，勾选运行 astra-server 的程序'; \
+	  else \
+	    case "$$out" in \
+	      *-10004*) inj_note='辅助功能未授权（System Events 报 -10004）：系统设置 → 隐私与安全 → 辅助功能，勾选终端 / astra-server' ;; \
+	      *) inj_note="osascript 探测失败：$$out" ;; \
+	    esac; \
+	  fi; \
+	elif [ "$$os" = "Linux" ]; then \
+	  if command -v xdotool >/dev/null 2>&1; then \
+	    inj_ok=1; inj_tag='\033[32mOK    \033[0m'; inj_note='xdotool'; \
+	  else \
+	    inj_note='未装 xdotool：apt install xdotool（X11）；Wayland 下 xdotool 通常不可用，只能看不能控'; \
+	  fi; \
+	else \
+	  inj_note="$$os 没有注入后端（macOS 用 cliclick / osascript，Linux 用 xdotool）"; \
+	fi; \
+	srv="$${ASTRA_SERVER:-http://127.0.0.1:7788}"; tok="$${ASTRA_TOKEN:-}"; \
+	cp_tag='\033[33m跳过  \033[0m'; cp_note=''; \
+	if [ -z "$$tok" ]; then \
+	  cp_note='未设 ASTRA_TOKEN，跳过能力接口探测（直接 curl 只会拿到 401）；token 见 ~/.astra/admin-cli.json'; \
+	else \
+	  code=$$(curl -s --noproxy '*' -m 5 -o /dev/null -w '%{http_code}' \
+	         -H "Authorization: Bearer $$tok" "$$srv/v1/remote/capabilities" 2>/dev/null || true); \
+	  [ -z "$$code" ] && code=000; \
+	  case "$$code" in \
+	    200) cp_tag='\033[32mOK    \033[0m'; cp_note="GET $$srv/v1/remote/capabilities → 200" ;; \
+	    503) cp_tag='\033[31m不可用\033[0m'; cp_note='HTTP 503：服务端未启用远程桌面（ASTRA_REMOTE_DISABLED=1 或装配失败，看服务日志）' ;; \
+	    404) cp_note='HTTP 404：服务端版本较旧，没有 /v1/remote 路由' ;; \
+	    401|403) cp_note="HTTP $${code}：token 无效或没有 session:read 权限" ;; \
+	    *) cp_note="HTTP $${code}：控制面未起或不可达（make serve 后重试）" ;; \
+	  esac; \
+	fi; \
+	if [ $$cap_ok -eq 1 ] && [ $$inj_ok -eq 1 ]; then \
+	  mode_note='看 + 控（view / control）'; \
+	elif [ $$cap_ok -eq 1 ]; then \
+	  mode_note='只看（view）+ 快捷操作（control 会被降级为只读）'; \
+	else \
+	  mode_note='无（抓屏不可用，远程桌面用不了）'; \
+	fi; \
+	printf '\033[1m远程桌面自检\033[0m（抓屏不可用即 exit 1；注入不可用只记警告）\n\n'; \
+	printf '%s%s\n' '平台          ' "$$os $$arch"; \
+	printf '%s%b  %s\n' '抓屏·监看     ' "$$cap_tag" "$$cap_note"; \
+	printf '%s%b  %s\n' '注入·键鼠接管 ' "$$inj_tag" "$$inj_note"; \
+	printf '%s%b  %s\n' '控制面接口    ' "$$cp_tag" "$$cp_note"; \
+	printf '%s%s\n' '可用模式      ' "$$mode_note"; \
+	printf '\n'; \
+	rm -f "$$tmp"; \
+	if [ $$cap_ok -eq 0 ]; then \
+	  printf '\033[31m结论：抓屏不可用，手机端只会黑屏 —— 先修上面「抓屏」那一行（exit 1）\033[0m\n'; \
+	  exit 1; \
+	fi; \
+	if [ $$inj_ok -eq 1 ]; then \
+	  printf '\033[32m结论：看和控都就绪\033[0m —— admin-cli remote pair 生成配对码，手机扫码即可\n'; \
+	else \
+	  printf '\033[33m结论：只能看不能控（只读模式）\033[0m —— 画面与快捷操作可用；要接管就按上面「注入」那一行补权限\n'; \
+	fi; \
+	exit 0
+
