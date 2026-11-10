@@ -44,7 +44,7 @@ export function normalizePoint(clientX: number, clientY: number, rect: RectLike)
 
 // ── 画质档位 ────────────────────────────────────────────────────
 
-export type QualityTier = 'low' | 'medium' | 'high'
+export type QualityTier = 'saver' | 'low' | 'medium' | 'high'
 
 export type QualityPreset = {
   key: QualityTier
@@ -55,11 +55,17 @@ export type QualityPreset = {
 }
 
 /**
- * 三档不是「低中高」随便取的：640/6fps 是 4G 上不卡的下限（单帧 30–50KB），
- * 960/8 是默认（看代码能认清字），1600/12 只在局域网/家用 Wi-Fi 用。
+ * 四档不是「随便取值」：480/4fps/q40 是 4G 按流量计费时的下限（单帧 ~15KB，
+ * 一分钟不到 4MB），640/6 是移动网络不卡的下限，960/8 是默认（看代码能认清字），
+ * 1600/12 只在局域网/家用 Wi-Fi 用。
+ *
+ * 「省流量」不是给 WebRTC 省——**DataChannel 里跑的仍是 JPEG**，WebRTC 买到的是
+ * 直连与拥塞控制，不是带宽（见 docs/remote-desktop.md）。想省流量只能降这一档。
+ *
  * 数值同时与服务端 Policy 的默认值对齐，切档时整包发过去，不做增量。
  */
 export const QUALITY_PRESETS: readonly QualityPreset[] = [
+  { key: 'saver', label: '省流量', maxWidth: 480, fps: 4, quality: 40 },
   { key: 'low', label: '低', maxWidth: 640, fps: 6, quality: 45 },
   { key: 'medium', label: '中', maxWidth: 960, fps: 8, quality: 60 },
   { key: 'high', label: '高', maxWidth: 1600, fps: 12, quality: 75 },
@@ -68,7 +74,11 @@ export const QUALITY_PRESETS: readonly QualityPreset[] = [
 export const DEFAULT_TIER: QualityTier = 'medium'
 
 export function qualityPreset(tier: QualityTier): QualityPreset {
-  return QUALITY_PRESETS.find((p) => p.key === tier) ?? QUALITY_PRESETS[1]
+  return (
+    QUALITY_PRESETS.find((p) => p.key === tier) ??
+    QUALITY_PRESETS.find((p) => p.key === DEFAULT_TIER) ??
+    QUALITY_PRESETS[0]
+  )
 }
 
 /** 发 `{"type":"quality"}` 用的载荷。字段名与后端 Quality 结构逐字对应。 */
@@ -81,6 +91,39 @@ export function qualityMessage(tier: QualityTier): {
   const p = qualityPreset(tier)
   return { type: 'quality', maxWidth: p.maxWidth, fps: p.fps, quality: p.quality }
 }
+
+// ── 快捷键条 ────────────────────────────────────────────────────
+//
+// 键名必须是后端白名单里的值（internal/remotedesk/input.go 的 allowedNamedKeys
+// 与「单字符 [A-Za-z0-9]」规则），否则整条事件会被 ErrDenied 丢掉：
+//   Enter / Tab / Escape / Backspace / Delete / Space / ArrowUp…
+// 组合键走 mods，取值 cmd / ctrl / alt / shift，逗号分隔。
+//
+// Cmd+C / Cmd+V 为什么不是「复制粘贴一段文本」：剪贴板不过这条通道（设计如此），
+// 所以这里只发「按下 cmd+c」，粘贴的内容仍是电脑自己剪贴板里的东西。
+
+export type KeyShortcut = {
+  label: string
+  key: string
+  mods?: string
+  /** 悬停说明。触摸设备上看不到，但桌面上能救一次误点。 */
+  title?: string
+}
+
+export const KEY_SHORTCUTS: readonly KeyShortcut[] = [
+  { label: 'Enter', key: 'Enter', title: '回车' },
+  { label: 'Esc', key: 'Escape', title: 'Esc' },
+  { label: 'Tab', key: 'Tab', title: 'Tab' },
+  { label: '⌫', key: 'Backspace', title: '退格' },
+  { label: '↑', key: 'ArrowUp', title: '方向上' },
+  { label: '↓', key: 'ArrowDown', title: '方向下' },
+  { label: '←', key: 'ArrowLeft', title: '方向左' },
+  { label: '→', key: 'ArrowRight', title: '方向右' },
+  { label: '⌘C', key: 'c', mods: 'cmd', title: '复制（电脑上的剪贴板）' },
+  { label: '⌘V', key: 'v', mods: 'cmd', title: '粘贴（电脑上的剪贴板）' },
+  { label: '⌘Z', key: 'z', mods: 'cmd', title: '撤销' },
+  { label: '⌘Tab', key: 'Tab', mods: 'cmd', title: '切换应用' },
+] as const
 
 // ── 状态文案 ────────────────────────────────────────────────────
 

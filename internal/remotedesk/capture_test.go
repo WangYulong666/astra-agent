@@ -175,8 +175,12 @@ func TestRealScreencapture(t *testing.T) {
 		}
 		t.Fatalf("真机抓屏应可用，实际不可用：reason=%q hint=%q", info.Reason, info.Hint)
 	}
-	if info.Backend != "screencapture" {
-		t.Fatalf("Backend 应为 screencapture，实际 %q", info.Backend)
+	// 后端可能是 cgo（darwin+cgo 优先）也可能是 screencapture（回退）。
+	// 两条路都必须真能出图；cgo 的帧率门槛在 capture_cgo_darwin_test.go 里。
+	switch info.Backend {
+	case "screencapture", "cgo-cgwindow":
+	default:
+		t.Fatalf("Backend 应是 screencapture 或 cgo-cgwindow，实际 %q", info.Backend)
 	}
 
 	start := time.Now()

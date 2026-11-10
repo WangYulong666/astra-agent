@@ -3,6 +3,7 @@ package remotedesk
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -10,7 +11,6 @@ import (
 	_ "image/gif" // 注册解码器（gnome-screenshot 在某些环境给 gif/bmp）
 	"image/jpeg"
 	_ "image/png"
-	"math"
 	"os"
 	"os/exec"
 	"sync"
@@ -34,7 +34,31 @@ const (
 	defaultJPEGQuality = 70
 	// grabTimeout 是单次抓屏的兜底超时（调用方没给 ctx 上限时用）。
 	grabTimeout = 10 * time.Second
+	// suspendedGrabThreshold 是「屏幕睡着」的判定线：单帧超过它必然异常。
+	//
+	// 本机实测（Mac mini M4 / macOS 26.2）：显示器休眠时
+	// CGWindowListCreateImage 单帧 940ms（正常 28–31ms），screencapture 则
+	// 退出码 0 但产出全黑 PNG。两种情况都必须显式识别：不识别的话抓屏泵会
+	// 以 1fps 空转把 CPU 打满，还什么画面都发不出去。
+	suspendedGrabThreshold = 500 * time.Millisecond
+	// suspendedReason 是「抓不到真实画面」的对外说法。两种成因（没给屏幕录制
+	// 权限 / 显示器休眠）在 macOS 上症状一样，文案里都写清楚，别让用户瞎猜。
+	suspendedReason = "屏幕录制权限不足（抓到全黑画面）；也可能是显示器休眠/锁屏"
 )
+
+// errScreenSuspended 表示这一帧不是真的抓到了画面：屏幕睡了（单帧 500ms+）
+// 或者抓回来一片全黑（没权限 / 锁屏）。
+//
+// 单独一个错误类型是为了让抓屏泵能把它从「抓屏失败」里摘出来：休眠不是故障，
+// 不该累加到「连续失败 5 次判死刑」上，正确反应是退避等它醒。
+var errScreenSuspended = errors.New("remotedesk: 屏幕休眠/未授权，抓不到画面")
+
+// fastGrabber 是「单帧成本远低于外部命令后端」的标记（目前只有 cgo 抓屏）。
+// 帧流据此放宽默认帧率上限：screencapture 110–140ms/帧只能跑 5~7fps，
+// 给它 20fps 只会让任务排队。
+type fastGrabber interface {
+	fastGrab() bool
+}
 
 // thumbGrabber 是可选能力：抓屏的同时顺带给出灰度缩略图，
 // 让帧流不必为了做「画面有没有变」的对比去 JPEG 解码整帧。
@@ -50,8 +74,20 @@ type screenSource interface {
 	ScreenSize() Screen
 }
 
-// defaultCapture 按 GOOS 分派到平台实现。
-func defaultCapture(cfg Config) (Capture, error) { return newPlatformCapture(cfg) }
+// defaultCapture 按 GOOS 分派到平台实现，并优先尝试「加速后端」。
+//
+// 加速后端（darwin+cgo 的 CGWindowListCreateImage）只有在真有符号、
+// 真能抓出一帧时才被选中；取不到符号或首帧失败就**静默回退**到原来的
+// 外部命令后端——回退路径是硬约束：抓屏加速失败绝不能让监看整层不可用。
+//
+// 非 darwin / 非 cgo 构建下 newAcceleratedCapture 恒返回 (nil, nil)，
+// 这条分支编译期就没了（见 capture_accel_other.go）。
+func defaultCapture(cfg Config) (Capture, error) {
+	if c, err := newAcceleratedCapture(cfg); err == nil && c != nil {
+		return c, nil
+	}
+	return newPlatformCapture(cfg)
+}
 
 // commandCapture 是「外部命令存 PNG 到临时文件 → Go 重编码」的通用后端。
 type commandCapture struct {
@@ -106,17 +142,24 @@ func (c *commandCapture) probeLocked() Capability {
 
 	_, thumb, err := c.grabLocked(ctx, GrabOptions{MaxWidth: 320, Quality: 50})
 	if err != nil {
+		if errors.Is(err, errScreenSuspended) {
+			// 全黑有两种成因，实测都会碰到：没给屏幕录制权限，或者显示器在休眠
+			// （本机实测：显示器休眠时 screencapture 退出码 0、画面纯黑、39KB；
+			//  用 caffeinate -u 唤醒后立刻变回 2.4MB 的真实画面）。
+			// 这里不做「自动唤醒」：探测每 30 秒可能被调一次，反复 caffeinate -u
+			// 会让显示器永远睡不着。让用户按 Hint 自己决定。
+			return Capability{
+				Backend: c.backend,
+				Reason:  suspendedReason,
+				Hint:    hintScreenRecording + "；若已授权，先唤醒显示器再试（caffeinate -u -t 5）",
+			}
+		}
 		return Capability{Backend: c.backend, Reason: clipReason(err.Error())}
 	}
 	if looksBlack(thumb) {
-		// 全黑有两种成因，实测都会碰到：没给屏幕录制权限，或者显示器在休眠
-		// （本机实测：显示器休眠时 screencapture 退出码 0、画面纯黑、39KB；
-		//  用 caffeinate -u 唤醒后立刻变回 2.4MB 的真实画面）。
-		// 这里不做「自动唤醒」：探测每 30 秒可能被调一次，反复 caffeinate -u
-		// 会让显示器永远睡不着。让用户按 Hint 自己决定。
 		return Capability{
 			Backend: c.backend,
-			Reason:  "屏幕录制权限不足（抓到全黑画面）；也可能是显示器休眠/锁屏",
+			Reason:  suspendedReason,
 			Hint:    hintScreenRecording + "；若已授权，先唤醒显示器再试（caffeinate -u -t 5）",
 		}
 	}
@@ -140,6 +183,7 @@ func (c *commandCapture) grabLocked(ctx context.Context, opt GrabOptions) (Frame
 	}
 	defer os.Remove(path)
 
+	start := time.Now()
 	cmd := exec.CommandContext(ctx, c.bin(), c.args(path)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -165,7 +209,20 @@ func (c *commandCapture) grabLocked(ctx context.Context, opt GrabOptions) (Frame
 
 	b := src.Bounds()
 	c.lastScreen = Screen{Width: b.Dx(), Height: b.Dy()}
-	return encodeFrame(src, opt)
+	frame, thumb, err := encodeFrame(src, opt)
+	if err != nil {
+		return Frame{}, nil, err
+	}
+	// 全黑 = 没权限或屏幕睡了（见 suspendedReason 的注释）；单帧 500ms+ 也
+	// 只可能是屏幕睡了。两种都返回 errScreenSuspended，让帧流退避而不是
+	// 把它当「抓屏失败」累计到判死刑。
+	if looksBlack(thumb) {
+		return Frame{}, nil, fmt.Errorf("%w: %s 抓到全黑画面", errScreenSuspended, c.backend)
+	}
+	if elapsed := time.Since(start); elapsed >= suspendedGrabThreshold {
+		return Frame{}, nil, fmt.Errorf("%w: %s 单帧耗时 %s", errScreenSuspended, c.backend, elapsed.Round(time.Millisecond))
+	}
+	return frame, thumb, nil
 }
 
 // bin 返回实际可执行文件路径；为空时退化成 PATH 查找。
@@ -178,7 +235,12 @@ func (c *commandCapture) bin() string {
 
 // encodeFrame 把任意 image.Image 下采样 + 编码成 JPEG，并顺带算灰度缩略图。
 func encodeFrame(src image.Image, opt GrabOptions) (Frame, []byte, error) {
-	img := downscale(src, opt.MaxWidth)
+	return encodeImage(downscale(src, opt.MaxWidth), opt)
+}
+
+// encodeImage 是编码段的公共实现：已经是 RGBA 的图直接编码（cgo 后端走这条，
+// 省掉 downscale 里的两次整图拷贝）。
+func encodeImage(img *image.RGBA, opt GrabOptions) (Frame, []byte, error) {
 	q := opt.Quality
 	if q <= 0 {
 		q = defaultJPEGQuality
@@ -207,14 +269,7 @@ func downscale(src image.Image, maxW int) *image.RGBA {
 	if sw <= 0 || sh <= 0 {
 		return image.NewRGBA(image.Rect(0, 0, 1, 1))
 	}
-	dstW, dstH := sw, sh
-	if maxW > 0 && sw > maxW {
-		dstW = maxW
-		dstH = int(math.Round(float64(sh) * float64(dstW) / float64(sw)))
-		if dstH < 1 {
-			dstH = 1
-		}
-	}
+	dstW, dstH := downscaleSize(sw, sh, maxW)
 	if dstW == sw && dstH == sh {
 		return toOpaqueRGBA(src)
 	}

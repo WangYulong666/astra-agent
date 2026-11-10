@@ -487,6 +487,9 @@ func (s *Server) Start() (string, error) {
 	if s.hints != nil {
 		s.hints.SetURL(normalizeLoopback(ln.Addr(), "http://"+s.cfg.Addr))
 	}
+	// 外网可达性：设备主动出站连 relay。放在这里是因为要拿真实监听端口
+	// （cfg.Addr 可能是 :0）；隧道要连的是自己的回环地址，不是通配地址。
+	s.startTunnel(loopbackHostPort(ln.Addr()))
 	go func() {
 		if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.errCh <- err
@@ -820,4 +823,14 @@ func (s *Server) startTunnel(localAddr string) {
 	}
 	s.tunnel = t
 	s.lg.Printf("外网中继已启动：%s（设备 %s）", url, dev)
+}
+
+// loopbackHostPort 把监听地址统一成 "127.0.0.1:<port>"。
+// 监听在 [::]:8080 / 0.0.0.0:8080 时，直接拿去 dial 会连到通配地址上，
+// 必须先换成回环。
+func loopbackHostPort(a net.Addr) string {
+	if ta, ok := a.(*net.TCPAddr); ok {
+		return net.JoinHostPort("127.0.0.1", strconv.Itoa(ta.Port))
+	}
+	return a.String()
 }

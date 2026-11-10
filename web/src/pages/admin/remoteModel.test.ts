@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_TIER,
+  KEY_SHORTCUTS,
   QUALITY_PRESETS,
   capabilityLamps,
   dropRate,
@@ -16,6 +17,7 @@ import {
   modeLabel,
   normalizePoint,
   qualityMessage,
+  qualityPreset,
   readOnlyReason,
   reconnectDelay,
   resolutionText,
@@ -50,8 +52,9 @@ describe('坐标归一化', () => {
 })
 
 describe('画质档位', () => {
-  it('三档参数与后端 Policy 对齐', () => {
+  it('四档参数与后端 Policy 对齐（v2 多了「省流量」）', () => {
     expect(QUALITY_PRESETS.map((p) => [p.key, p.maxWidth, p.fps, p.quality])).toEqual([
+      ['saver', 480, 4, 40],
       ['low', 640, 6, 45],
       ['medium', 960, 8, 60],
       ['high', 1600, 12, 75],
@@ -66,6 +69,44 @@ describe('画质档位', () => {
       fps: 12,
       quality: 75,
     })
+    // 省流量档是给 4G 用的：480 / 4fps / q40，一分钟约 3–4MB
+    expect(qualityMessage('saver')).toEqual({
+      type: 'quality',
+      maxWidth: 480,
+      fps: 4,
+      quality: 40,
+    })
+  })
+
+  it('未知档位退回默认档，不会发出 0/0/0（那等于让服务端用策略上限）', () => {
+    expect(qualityPreset('nope' as never).key).toBe('medium')
+  })
+})
+
+describe('快捷键条', () => {
+  it('键名都在后端白名单里（否则整条事件会被 ErrDenied 丢掉）', () => {
+    const named = new Set([
+      'Enter',
+      'Tab',
+      'Escape',
+      'Backspace',
+      'Delete',
+      'Space',
+      'ArrowUp',
+      'ArrowDown',
+      'ArrowLeft',
+      'ArrowRight',
+    ])
+    for (const s of KEY_SHORTCUTS) {
+      const ok = s.key.length === 1 ? /^[A-Za-z0-9]$/.test(s.key) : named.has(s.key)
+      expect(ok, `${s.label} → ${s.key}`).toBe(true)
+      if (s.mods) expect(s.mods.split(',')).toEqual(['cmd'])
+    }
+  })
+
+  it('四类必需的组合键都在：⌘C / ⌘V / ⌘Z / ⌘Tab', () => {
+    const combos = KEY_SHORTCUTS.filter((s) => s.mods === 'cmd').map((s) => `${s.key}+${s.mods}`)
+    expect(combos).toEqual(['c+cmd', 'v+cmd', 'z+cmd', 'Tab+cmd'])
   })
 })
 

@@ -4816,6 +4816,74 @@ kbd {
   max-width: 1440px;
 }
 
+/* ── 0. 链路状态条 ─────────────────────────────────────────── */
+/* 放在最上面一行：手机连不上时第一件事是判断「走直连还是走中继」。
+   三种色调对应三件事：ok=通了、warn=要你去配/去查、off=读不到（未知）。 */
+.remote-linkbar {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.remote-linkbar-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--muted);
+  box-shadow: 0 0 0 3px rgba(142, 153, 172, 0.14);
+}
+.remote-linkbar.ok .remote-linkbar-dot {
+  background: var(--green);
+  box-shadow: 0 0 0 3px var(--green-soft);
+}
+.remote-linkbar.warn .remote-linkbar-dot {
+  background: var(--amber);
+  box-shadow: 0 0 0 3px var(--amber-soft);
+}
+.remote-linkbar-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.remote-linkbar-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.remote-linkbar-label {
+  font-size: 12.5px;
+  font-weight: 650;
+}
+.remote-linkbar-summary {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.remote-linkbar-details {
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.remote-linkbar-hint {
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.remote-linkbar-actions {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
 /* ── 1. 能力条 ─────────────────────────────────────────────── */
 
 .remote-caps {
@@ -5091,6 +5159,13 @@ kbd {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  flex-wrap: wrap;
+}
+/* 「返回」不能被标题挤成竖排两行：它是这一屏唯一的退出按钮。
+   标题区自己 flex-wrap 换行，按钮固定不缩。 */
+.remote-viewer-head > .btn {
+  flex: none;
+  white-space: nowrap;
 }
 .remote-viewer-title {
   display: flex;
@@ -5146,6 +5221,7 @@ kbd {
   background: var(--t-sunken, var(--bg));
 }
 .remote-canvas-wrap {
+  position: relative;
   width: 100%;
   height: 100%;
   display: flex;
@@ -5168,6 +5244,100 @@ kbd {
   /* 触摸全部交给我们：否则手机会把「拖动」当成页面滚动/下拉刷新 */
   touch-action: none;
 }
+/* 虚拟指针：拖动它 = 移动远端光标。
+   44px 的命中区（iOS/Android 的最小可点尺寸），十字本身只占 1px，
+   所以「看得到的位置」和「拖得动的位置」都对得上。 */
+.remote-pointer {
+  position: absolute;
+  z-index: 4;
+  width: 44px;
+  height: 44px;
+  margin: -22px 0 0 -22px;
+  border-radius: 50%;
+  cursor: grab;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.remote-pointer:active {
+  cursor: grabbing;
+}
+/* 十字：两条 1px 线穿过整个命中区，深色描边保证在浅色画面上也看得见 */
+.remote-pointer::before,
+.remote-pointer::after {
+  content: '';
+  position: absolute;
+  background: rgba(255, 255, 255, 0.62);
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.95);
+}
+.remote-pointer::before {
+  left: 50%;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  transform: translateX(-0.5px);
+}
+.remote-pointer::after {
+  top: 50%;
+  left: 0;
+  height: 1px;
+  width: 100%;
+  transform: translateY(-0.5px);
+}
+.remote-pointer-ring {
+  position: absolute;
+  inset: 13px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.7),
+    0 0 10px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+.remote-pointer-dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 4px;
+  height: 4px;
+  margin: -2px 0 0 -2px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.75);
+  pointer-events: none;
+}
+.remote-pointer-pos {
+  position: absolute;
+  left: 100%;
+  top: 50%;
+  transform: translate(6px, -50%);
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: rgba(8, 11, 16, 0.74);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  font-size: 9.5px;
+  color: #eaf2ff;
+  white-space: nowrap;
+  opacity: 0.92;
+  pointer-events: none;
+}
+/* 靠右边缘时标签翻到左边：wrap 是 overflow:hidden，挂在右侧会被裁掉。 */
+.remote-pointer-pos.flip {
+  left: auto;
+  right: 100%;
+  transform: translate(-6px, -50%);
+}
+.remote-pointer-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* 主操作：在指针位置点一下。用 accent 描边把它从「开关」里区分出来。 */
+.remote-pointer-click {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .remote-overlay {
   position: absolute;
   inset: auto 12px 12px 12px;
@@ -5261,6 +5431,24 @@ kbd {
   flex-direction: column;
   gap: 6px;
 }
+/* 快捷键条：横向滚动。手机上「划一下找一个键」比弹键盘快，
+   而 12 个键在 393px 宽度里一定放不下，所以 overflow-x 是关键。 */
+.remote-shortcuts {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+}
+.remote-shortcut {
+  flex: none;
+  min-width: 44px;
+  padding: 0 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
 .remote-keys-row {
   display: flex;
   gap: 6px;
@@ -5322,6 +5510,16 @@ kbd {
 }
 .remote-status-conn {
   color: var(--text-2);
+}
+/* 链路：WebRTC 直连时是绿的，回退到 WS 时保持中性灰（不是故障）。 */
+.remote-status-link {
+  color: var(--muted);
+}
+.remote-status-link.on {
+  color: var(--green);
+}
+.remote-awake {
+  opacity: 0.85;
 }
 /* 红底配深字：--red 在两套主题里都是亮红，深色字的对比度是稳定的，
    而 var(--bg) 在浅色主题下会变成白字压亮红（2.2:1，读不清）。 */

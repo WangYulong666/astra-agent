@@ -1,6 +1,6 @@
-// 远程画面查看器：一条 WebSocket 单帧 JPEG 流 + canvas 渲染 + 手势注入。
+// 远程画面查看器：WebRTC 优先的 JPEG 流 + canvas 渲染 + 手势注入。
 //
-// 三件容易做错的事，先写在这里：
+// 四件容易做错的事，先写在这里：
 //
 // 1. **每帧必须 bitmap.close()。** ImageBitmap 不归 GC 管（解码后的像素在
 //    浏览器进程里），手机上 8fps × 5 分钟就是几百张 1600×900 的位图，
@@ -10,6 +10,10 @@
 // 3. **票据是一次性的。** WS 不能带 header，所以每次（重）连都要重新
 //    POST /v1/auth/sse-ticket 换票；复用旧票会被服务端 401 掉，
 //    表现是「断线后再也连不上」。
+// 4. **两条画面来源，一条回退路径。** WebRTC（DataChannel + 分片 JPEG）先试，
+//    失败/超时就静默回退 WS 的 binary 帧 —— 服务端在 rtc-answer 之后仍然
+//    继续发 binary 帧（见 internal/api/remote_ws.go 文件头），所以回退时
+//    画面一秒都不断。RTC 建立后 WS 的帧只是同内容的镜像，直接忽略（不解码）。
 //
 // 另外：离开页面**不**主动结束会话（见 endNow 的注释），只关 WS。
 
@@ -19,6 +23,7 @@ import type { RemoteCapabilities, RemoteSession } from '../../api'
 import { copyText } from '../../components/ui'
 import {
   DEFAULT_TIER,
+  KEY_SHORTCUTS,
   QUALITY_PRESETS,
   actionsBlockedReason,
   dropRate,
@@ -33,7 +38,9 @@ import {
   sessionStatusLabel,
   sessionStatusTone,
 } from './remoteModel'
-import type { QualityTier } from './remoteModel'
+import type { KeyShortcut, NormPoint, QualityTier } from './remoteModel'
+import { transportLabel } from './remoteLink'
+import type { Transport } from './remoteLink'
 import {
   DRAG_SLOP,
   PINCH_RATIO,
@@ -42,6 +49,8 @@ import {
 } from './remoteGestures'
 import type { GestureTrack, Point, RemoteInputEvent } from './remoteGestures'
 import { normalizePoint } from './remoteModel'
+import { startWebRTC } from './remoteWebRTC'
+import type { WebRTCSession } from './remoteWebRTC'
 
 /** 等桌面端批准的轮询：2s 一次，最多 60s。 */
 const APPROVAL_POLL_MS = 2000
@@ -74,6 +83,16 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
   const [frame, setFrame] = useState({ w: 0, h: 0 })
   const [serverStats, setServerStats] = useState<RemoteSession['stats'] | null>(null)
   const [localFps, setLocalFps] = useState(0)
+  // 画面走的是哪条路：rtc（WebRTC DataChannel）/ ws（中继 WS + JPEG）。
+  // 协商期也叫 negotiating，界面照实显示成「中继(WS)」——那时确实是它。
+  const [transport, setTransport] = useState<Transport>('negotiating')
+  /** 回退原因。只进状态条的 tooltip，不弹错（回退是设计内行为，不是故障）。 */
+  const [transportWhy, setTransportWhy] = useState('')
+  /** 虚拟指针的归一化位置：屏幕比例变化时按比例映射，不用重设。 */
+  const [ptr, setPtr] = useState<NormPoint>({ x: 0.5, y: 0.5 })
+  const [ptrOn, setPtrOn] = useState(true)
+  /** 指针在页面里的像素位置（相对 canvas 所在的 wrap）。canvas 会随窗口/缩放变。 */
+  const [ptrBox, setPtrBox] = useState({ left: 0, top: 0, width: 0, height: 0 })
   // 会话时长的刷新钟：只为了每秒重渲染一次，别在渲染里直接 Date.now()
   // （那样只有别的状态变了才会跳秒）。
   const [clock, setClock] = useState(() => Date.now())
@@ -86,8 +105,14 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
   const [url, setUrl] = useState('')
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const wrapRef = useRef<HTMLDivElement | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
-  const pendingRef = useRef<ArrayBuffer | null>(null)
+  const rtcRef = useRef<WebRTCSession | null>(null)
+  /** 当前链路（ref 版）：WS onmessage 里要即时判断，不能等 state 更新。 */
+  const transportRef = useRef<Transport>('negotiating')
+  /** 最近一帧 RTC 画面的时刻。用来判断「RTC 是不是还在出画」。 */
+  const lastRtcAtRef = useRef(0)
+  const pendingRef = useRef<Uint8Array<ArrayBuffer> | null>(null)
   const drawingRef = useRef(false)
   const framesRef = useRef(0)
   const droppedRef = useRef(0)
@@ -96,6 +121,13 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
   const touchedAtRef = useRef(0)
   const tierRef = useRef<QualityTier>(DEFAULT_TIER)
   const zoomRef = useRef(1)
+  const ptrDragRef = useRef(false)
+
+  const applyTransport = useCallback((t: Transport, why = '') => {
+    transportRef.current = t
+    setTransport(t)
+    if (why) setTransportWhy(why)
+  }, [])
 
   // 会话对象换了（用户在会话区点了另一台设备）→ 整体重置。
   useEffect(() => {
@@ -106,6 +138,10 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
     setFrame({ w: 0, h: 0 })
     framesRef.current = 0
     droppedRef.current = 0
+    transportRef.current = 'negotiating'
+    setTransport('negotiating')
+    setTransportWhy('')
+    lastRtcAtRef.current = 0
   }, [initial])
 
   useEffect(() => {
@@ -121,11 +157,26 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
   const readOnly = readOnlyMsg !== ''
   const actionsWhy = actionsBlockedReason(capabilities?.actions ?? null)
 
-  const send = useCallback((ev: RemoteInputEvent) => {
+  /**
+   * 发一条输入事件。优先走 WebRTC 的 input DataChannel（少一跳、少一次 relay
+   * 回源），没通就发 WS。
+   *
+   * 两条路的区别只有一个：WS 的消息是 `{"type":"input",...}`，而 RTC 的 DC
+   * 上服务端直接把它 Unmarshal 成 InputEvent（内部形状扁平），所以**不能**
+   * 带 type 外壳。发错了服务端会当作「未知消息类型」或字段全空。
+   */
+  const dispatch = useCallback((payload: object) => {
+    const rtc = rtcRef.current
+    if (rtc && rtc.sendInput(payload)) return
     const ws = wsRef.current
     if (!ws || ws.readyState !== WebSocket.OPEN) return
-    ws.send(JSON.stringify({ type: 'input', ...ev }))
+    ws.send(JSON.stringify({ type: 'input', ...payload }))
   }, [])
+
+  const send = useCallback(
+    (ev: RemoteInputEvent) => dispatch(ev),
+    [dispatch],
+  )
 
   const sendRaw = useCallback((msg: Record<string, unknown>) => {
     const ws = wsRef.current
@@ -185,7 +236,7 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
   // ── 帧解码：单通道，永远只处理最新一帧 ─────────────────────
   //
   // 循环里再取一次 pendingRef：解码一帧的时间足够再收一帧，
-  // 那期间只保留最新的一张，旧的直接丢掉（丢帧计数器在 onmessage 里加）。
+  // 那期间只保留最新的一张，旧的直接丢掉（丢帧计数器在 pushFrame 里加）。
   const pump = useCallback(async () => {
     if (drawingRef.current) return
     drawingRef.current = true
@@ -219,13 +270,33 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
     }
   }, [])
 
-  // ── WebSocket：连上 → 收帧 → 断线退避重连 ──────────────────
+  /** 收一帧（WS 的 binary 帧或 RTC 重组出来的帧都走这里）。 */
+  const pushFrame = useCallback(
+    (buf: ArrayBuffer | Uint8Array) => {
+      // 上一帧还在解码 → 覆盖它的前一张（丢旧帧）。
+      if (pendingRef.current) droppedRef.current++
+      pendingRef.current = frameBytes(buf)
+      void pump()
+    },
+    [pump],
+  )
+
+  // ── WebSocket：连上 → 收帧 → 协商 WebRTC → 断线退避重连 ─────
   useEffect(() => {
     if (cur.status !== 'active') return
     let closed = false
     let attempt = 0
     let timer: number | undefined
     let socket: WebSocket | null = null
+    let rtc: WebRTCSession | null = null
+
+    /** 收掉这一路的 RTC。**PC 不能复用**：断线重连必须重建（ICE/DTLS 全作废）。 */
+    const teardownRTC = () => {
+      if (rtc) rtc.close()
+      rtc = null
+      rtcRef.current = null
+      lastRtcAtRef.current = 0
+    }
 
     const schedule = () => {
       if (closed) return
@@ -238,6 +309,72 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
       }
       setConn('retry')
       timer = window.setTimeout(() => void open(), delay)
+    }
+
+    /**
+     * 起 WebRTC 协商。成功就把画面切到 DataChannel；失败一律静默回退，
+     * 现场只多一句 tooltip（transportWhy），不弹错、不打断 WS。
+     */
+    const startRTC = () => {
+      if (closed) return
+      teardownRTC()
+      applyTransport('negotiating')
+      const session = startWebRTC({
+        sendSignal: (msg) => {
+          const ws = socket
+          if (!ws || ws.readyState !== WebSocket.OPEN) return
+          ws.send(JSON.stringify(msg))
+        },
+        onFrame: (jpeg) => {
+          if (closed) return
+          lastRtcAtRef.current = Date.now()
+          pushFrame(jpeg)
+        },
+        onEvent: (ev) => {
+          if (closed) return
+          if (ev.kind === 'connect') {
+            applyTransport('rtc')
+            return
+          }
+          // 回退：WS 的 binary 帧还在流，画面不断。这里刻意不 setErr——
+          // 打洞失败在有 NAT 的网络上很常见，不是用户做错了什么。
+          applyTransport('ws', ev.reason)
+        },
+      })
+      rtc = session
+      rtcRef.current = session
+    }
+
+    const handleText = (raw: string) => {
+      let msg: any
+      try {
+        msg = JSON.parse(raw)
+      } catch {
+        return
+      }
+      switch (msg?.type) {
+        case 'hello':
+          if (msg.stats) setServerStats(normalizeStats(msg.stats))
+          // hello.rtc 只是能力声明（本机 Pion 栈能不能跑），能不能连通要看
+          // rtc-answer。不声明就老实走 WS，省一次必然失败的协商。
+          if (msg.rtc) startRTC()
+          break
+        case 'stats':
+          // stats 可能直接平铺，也可能包在 stats 里；两种都认。
+          setServerStats(normalizeStats(msg.stats ?? msg))
+          break
+        case 'rtc-answer':
+        case 'rtc-failed':
+          rtc?.handleSignal(msg)
+          break
+        case 'error':
+          setErr(String(msg.error || msg.detail || msg.message || '画面流出错'))
+          break
+        case 'pong':
+          break
+        default:
+          break
+      }
     }
 
     const open = async () => {
@@ -271,16 +408,21 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
           return
         }
         if (!(ev.data instanceof ArrayBuffer)) return
-        // 上一帧还在解码 → 覆盖它的前一张（丢旧帧）。
-        if (pendingRef.current) droppedRef.current++
-        pendingRef.current = ev.data
-        void pump()
+        // RTC 在出画时，WS 的 binary 帧只是同一帧的镜像（服务端不切换来源）。
+        // 解两遍纯烧 CPU 和电。3 秒内没收到 RTC 帧就当作 RTC 掉了，
+        // 重新吃 WS 的帧——这是最后一道自愈，不依赖任何超时回调。
+        if (transportRef.current === 'rtc' && Date.now() - lastRtcAtRef.current < 3000) {
+          return
+        }
+        pushFrame(ev.data)
       }
       socket.onerror = () => {
         // onerror 之后一定会有 onclose，退避放在 close 里，避免 double-schedule。
       }
       socket.onclose = () => {
         wsRef.current = null
+        teardownRTC()
+        applyTransport('negotiating')
         if (closed) return
         // 断线有两种：网络抖一下，或者会话已经被结束（急停 / 设备被吊销）。
         // 先问一次状态：对着一个已经死掉的会话重试 5 次，用户只会看到
@@ -302,35 +444,11 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
       }
     }
 
-    const handleText = (raw: string) => {
-      let msg: any
-      try {
-        msg = JSON.parse(raw)
-      } catch {
-        return
-      }
-      switch (msg?.type) {
-        case 'hello':
-          if (msg.stats) setServerStats(normalizeStats(msg.stats))
-          break
-        case 'stats':
-          // stats 可能直接平铺，也可能包在 stats 里；两种都认。
-          setServerStats(normalizeStats(msg.stats ?? msg))
-          break
-        case 'error':
-          setErr(String(msg.error || msg.detail || '画面流出错'))
-          break
-        case 'pong':
-          break
-        default:
-          break
-      }
-    }
-
     void open()
     return () => {
       closed = true
       if (timer) window.clearTimeout(timer)
+      teardownRTC()
       // 先摘掉回调再关，避免 close 触发重连。
       if (socket) {
         socket.onclose = null
@@ -342,8 +460,8 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
       wsRef.current = null
       setConn('closed')
     }
-    // pump 是 useCallback 的稳定引用；依赖只放会话与状态，
-    // 避免每次 setState 都重连。
+    // pump / pushFrame / applyTransport 都是 useCallback 的稳定引用；
+    // 依赖只放会话与状态，避免每次 setState 都重连。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cur.status, cur.id, sendQuality, onSession])
 
@@ -404,6 +522,83 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
     return cv ? cv.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 }
   }
 
+  // ── 虚拟指针 ────────────────────────────────────────────────
+  //
+  // 手指压在目标上时自己会把目标挡住，加上指腹 8–10mm，点小按钮/菜单项
+  // 基本靠运气。这里把「瞄准」和「点击」拆开：拖动十字到目标（实时发 move，
+  // 电脑上的光标跟着走），再点「点击」按钮（在该坐标发 click）。
+  // 位置存归一化坐标，窗口大小/CSS 缩放/横竖屏变化时按比例映射。
+
+  /** 量 canvas 相对 wrap 的位置：canvas 是 width:100%+height:auto，wrap 里可能有留白。 */
+  const measurePointer = useCallback(() => {
+    const cv = canvasRef.current
+    const wrap = wrapRef.current
+    if (!cv || !wrap) return
+    const c = cv.getBoundingClientRect()
+    const w = wrap.getBoundingClientRect()
+    setPtrBox({ left: c.left - w.left, top: c.top - w.top, width: c.width, height: c.height })
+  }, [])
+
+  useEffect(() => {
+    measurePointer()
+    // 首帧尺寸变化（0 → 640×400）也要重测；zoom 有 120ms 的 CSS 过渡，
+    // 过渡结束后再量一次，否则指针会偏一小截。
+    const settle = window.setTimeout(measurePointer, 200)
+    window.addEventListener('resize', measurePointer)
+    return () => {
+      window.clearTimeout(settle)
+      window.removeEventListener('resize', measurePointer)
+    }
+  }, [measurePointer, frame.w, frame.h, zoom])
+
+  /** 把指针挪到某个 client 坐标（同时把光标推到电脑上）。 */
+  const movePointer = useCallback(
+    (clientX: number, clientY: number) => {
+      const cv = canvasRef.current
+      if (!cv) return
+      const p = normalizePoint(clientX, clientY, cv.getBoundingClientRect())
+      setPtr(p)
+      // 只读会话没有指针（不渲染），这里再挡一次：视图模式绝不发输入。
+      if (!readOnly) send({ op: 'move', x: p.x, y: p.y })
+    },
+    [readOnly, send],
+  )
+
+  const onPtrDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.stopPropagation()
+    ptrDragRef.current = true
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId)
+    } catch {
+      /* 老浏览器不支持指针捕获：拖动仍可用，只是移到元素外会掉 */
+    }
+    movePointer(e.clientX, e.clientY)
+  }
+
+  const onPtrMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!ptrDragRef.current) return
+    e.preventDefault()
+    e.stopPropagation()
+    movePointer(e.clientX, e.clientY)
+  }
+
+  const onPtrUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!ptrDragRef.current) return
+    ptrDragRef.current = false
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    } catch {
+      /* 同上 */
+    }
+  }
+
+  /** 指针位置点一下。和手势里的 click 完全同构，只是坐标不用手指去指。 */
+  const clickAtPointer = () => {
+    if (readOnly) return
+    send({ op: 'click', x: ptr.x, y: ptr.y })
+  }
+
   const applyGesture = (now: number) => {
     const g = gestureRef.current
     if (g.tracks.length === 0) return
@@ -424,6 +619,9 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
     if (res.kind === 'tap') {
       const t = g.tracks[0]
       tapRef.current = { at: now, point: t.start }
+      // 手指点哪儿，指针就跟到哪儿：下一次「点击」就在刚才那个位置，
+      // 不用再把十字拖回来。只在 tap 上做——拖动时指针跟着拖反而抖。
+      setPtr(normalizePoint(t.end.x, t.end.y, rectOf()))
     } else if (res.kind === 'double-tap') {
       // 用掉记忆，避免第三次轻点又变成双击。
       tapRef.current = null
@@ -638,15 +836,22 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
   const sendText = () => {
     const text = keyText
     if (!text) return
-    sendRaw({ type: 'input', op: 'text', text })
+    dispatch({ op: 'text', text })
     setKeyText('')
   }
 
-  const sendKey = (key: string) => {
-    const payload: Record<string, unknown> = { type: 'input', op: 'key', key }
-    if (cmdMod) payload.mods = 'cmd'
-    sendRaw(payload)
-    if (cmdMod) setCmdMod(false)
+  /**
+   * 发一条快捷键。键名与 mods 必须在后端白名单里（见 remoteModel.KEY_SHORTCUTS）。
+   *
+   * ⌘ 开关的语义：**点亮后按下去的那一键带上 cmd**。固定的组合键（⌘C/⌘V/⌘Z/⌘Tab）
+   * 自带 mods，不受它影响——否则点亮 ⌘ 再点 ⌘C 会变成「cmd+c」和「cmd」两件事。
+   */
+  const fireShortcut = (s: KeyShortcut) => {
+    const mods = s.mods || (cmdMod ? 'cmd' : '')
+    const payload: Record<string, unknown> = { op: 'key', key: s.key }
+    if (mods) payload.mods = mods
+    dispatch(payload)
+    if (cmdMod && !s.mods) setCmdMod(false)
   }
 
   const runAction = async (action: 'screenshot' | 'lock' | 'open_app' | 'open_url') => {
@@ -695,6 +900,7 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
   // 否则本地只收到几帧时会算出「掉帧 93%」这种假警。
   const frames = stats?.frames && stats.frames > 0 ? stats.frames : framesRef.current
   const started = clock - new Date(cur.createdAt).getTime()
+  const tp = transportLabel(transport)
 
   return (
     <div className="remote-viewer">
@@ -705,6 +911,21 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
             {sessionStatusLabel(cur.status)}
           </span>
           <span className="remote-tag dim">{modeLabel(cur.mode)}</span>
+          {/* 当前链路：WebRTC 直连 · P2P / 中继(WS) · relay。
+              合成一个标签是有意的：393 宽度下两个标签会把标题挤到换行。
+              回退原因只放在 tooltip 里——它不是错误，是这台网络环境的事实。 */}
+          <span
+            className={`remote-tag link ${tp.tone === 'ok' ? 'ok' : 'dim'}`}
+            title={
+              transportWhy
+                ? `已回退到 WS + JPEG：${transportWhy}`
+                : transport === 'rtc'
+                  ? '画面走 WebRTC DataChannel（P2P，不经 relay）'
+                  : '画面走 WS + JPEG（经 relay 或局域网直连回源）'
+            }
+          >
+            {tp.label} · {tp.peer}
+          </span>
         </div>
         <button className="btn small" onClick={() => void endNow()}>
           返回
@@ -718,7 +939,7 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
       <div className="remote-stage">
         {/* 事件挂在 canvas 上而不是外层：外层在桌面会留出左右的黑边，
             挂在外层的话点黑边也会被钳成 0/1 的坐标，等于误点画面边缘。 */}
-        <div className="remote-canvas-wrap">
+        <div className="remote-canvas-wrap" ref={wrapRef}>
           <canvas
             ref={canvasRef}
             className="remote-canvas"
@@ -735,6 +956,35 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
             onMouseLeave={onMouseUp}
             onWheel={onWheel}
           />
+          {/* 虚拟指针：压在画面上层，但坐标仍按 canvas 的 rect 归一化，
+              所以缩放/换档之后不用重新校准。只读会话不渲染（没有意义）。 */}
+          {ptrOn && !readOnly && cur.status === 'active' && (
+            <div
+              className="remote-pointer"
+              style={{
+                left: ptrBox.left + ptr.x * ptrBox.width,
+                top: ptrBox.top + ptr.y * ptrBox.height,
+              }}
+              role="button"
+              aria-label="虚拟指针，拖动它移动远端光标"
+              onPointerDown={onPtrDown}
+              onPointerMove={onPtrMove}
+              onPointerUp={onPtrUp}
+              onPointerCancel={onPtrUp}
+            >
+              <span className="remote-pointer-ring" aria-hidden="true" />
+              <span className="remote-pointer-dot" aria-hidden="true" />
+              {/* 坐标标签默认挂在十字右侧；靠近右边缘时翻到左侧，否则会被
+                  .remote-canvas-wrap 的 overflow:hidden 裁掉——而右边缘正是
+                  关闭按钮、滚动条这些「最需要看准」的地方。 */}
+              <span
+                className={`remote-pointer-pos mono ${ptr.x > 0.8 ? 'flip' : ''}`}
+                aria-hidden="true"
+              >
+                {Math.round(ptr.x * 100)} · {Math.round(ptr.y * 100)}
+              </span>
+            </div>
+          )}
         </div>
 
         {cur.status === 'pending_approval' && (
@@ -874,42 +1124,54 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
           </div>
         )}
 
+        {/* 虚拟指针的工具条：和「手势」是两条并行路径，互不干扰 */}
+        {!readOnly && (
+          <div className="remote-pointer-bar">
+            <button
+              className={`btn small ${ptrOn ? 'remote-toggle-on' : ''}`}
+              aria-pressed={ptrOn}
+              onClick={() => setPtrOn((v) => !v)}
+              title="画面上那个十字就是指针，把它拖到目标上"
+            >
+              指针
+            </button>
+            <button
+              className="btn small remote-pointer-click"
+              onClick={clickAtPointer}
+              disabled={!ptrOn}
+              title={`在指针位置（${Math.round(ptr.x * 100)}%, ${Math.round(ptr.y * 100)}%）点一下左键`}
+            >
+              点击
+            </button>
+            <span className="dim small">
+              拖动十字到目标再按「点击」——手指不用压在目标上，点小按钮也不会点偏
+            </span>
+          </div>
+        )}
+
         {/* 只读时整块不渲染：留一个禁用的键盘会让人一直怀疑「是不是没点上」。 */}
         {!readOnly && (
           <div className="remote-keys">
-            <div className="remote-keys-row">
-              <button className="btn small" onClick={() => sendKey('Enter')}>
-                Enter
-              </button>
-              <button className="btn small" onClick={() => sendKey('Tab')}>
-                Tab
-              </button>
-              <button className="btn small" onClick={() => sendKey('Escape')}>
-                Esc
-              </button>
-              <button className="btn small" onClick={() => sendKey('Backspace')}>
-                ⌫
-              </button>
-              <button className="btn small" onClick={() => sendKey('ArrowUp')}>
-                ↑
-              </button>
-              <button className="btn small" onClick={() => sendKey('ArrowDown')}>
-                ↓
-              </button>
-              <button className="btn small" onClick={() => sendKey('ArrowLeft')}>
-                ←
-              </button>
-              <button className="btn small" onClick={() => sendKey('ArrowRight')}>
-                →
-              </button>
+            {/* 快捷键条：横向滚动，一屏放不下就划。手机上比弹键盘快得多。 */}
+            <div className="remote-shortcuts">
               <button
-                className={`btn small ${cmdMod ? 'remote-toggle-on' : ''}`}
+                className={`btn small remote-shortcut ${cmdMod ? 'remote-toggle-on' : ''}`}
                 aria-pressed={cmdMod}
-                title="按下后，下一个按键会带上 cmd"
+                title="点亮后，下一个快捷键带上 cmd（⌘C/⌘V 自带，不受影响）"
                 onClick={() => setCmdMod((v) => !v)}
               >
                 ⌘
               </button>
+              {KEY_SHORTCUTS.map((s) => (
+                <button
+                  key={s.label}
+                  className="btn small remote-shortcut"
+                  title={s.title}
+                  onClick={() => fireShortcut(s)}
+                >
+                  {s.label}
+                </button>
+              ))}
             </div>
             <div className="remote-keys-row">
               <textarea
@@ -940,7 +1202,18 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
           <span className="remote-status-conn">
             {conn === 'live' ? '已连接' : conn === 'retry' ? '重连中…' : conn === 'connecting' ? '连接中…' : '已断开'}
           </span>
+          <span className={`remote-status-link ${tp.tone === 'ok' ? 'on' : ''}`} title={transportWhy || undefined}>
+            {tp.label}
+          </span>
           <span className="dim">时长 {formatDuration(started)}</span>
+          {/* 保持唤醒：控制面目前**没有**这个能力（没有 caffeinate 接管），
+              所以照实说「会黑屏」，而不是假装已经防住了。 */}
+          <span
+            className="dim remote-awake"
+            title="控制面没有接管电源管理：合盖 / 熄屏后抓不到画面。要在长时间连接时保持亮屏，请在电脑上临时用「安睡」设置或 caffeinate。"
+          >
+            电脑休眠会黑屏
+          </span>
         </div>
         <button className="remote-disconnect" onClick={() => void endNow()}>
           立即断开
@@ -953,6 +1226,24 @@ export function RemoteViewer({ initial, capabilities, onSession, onExit }: Props
 function clampZoom(z: number): number {
   if (!Number.isFinite(z)) return 1
   return Math.min(3, Math.max(1, Math.round(z * 100) / 100))
+}
+
+/**
+ * 把一帧统一成 ArrayBuffer 背书的视图。
+ *
+ * 原因：Blob 只接受 ArrayBuffer 背书的 ArrayBufferView，而 WebSocket 的
+ * binary 帧与 DataChannel 给的是 ArrayBufferLike（TS 5.7 起 Uint8Array 是
+ * 泛型的，`Uint8Array<ArrayBufferLike>` 不能当 BlobPart）。这里只是把类型
+ * 收窄，**不复制字节**（只有 SharedArrayBuffer 那种罕见情况才复制）。
+ */
+function frameBytes(buf: ArrayBuffer | Uint8Array): Uint8Array<ArrayBuffer> {
+  if (buf instanceof Uint8Array) {
+    if (buf.buffer instanceof ArrayBuffer) {
+      return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength)
+    }
+    return new Uint8Array(buf)
+  }
+  return new Uint8Array(buf)
 }
 
 /** 服务端 stats 字段可能缺，统一补 0，避免界面出现 undefined。 */

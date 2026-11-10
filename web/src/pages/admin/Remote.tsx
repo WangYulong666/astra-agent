@@ -20,6 +20,8 @@ import type {
 import { Modal, Notice, copyText } from '../../components/ui'
 import { fmtTime, relTime } from '../../format'
 import { RemoteViewer } from './RemoteViewer'
+import { describeLink, normalizeTunnel, relayAccessUrl } from './remoteLink'
+import type { LinkReport, TunnelState } from './remoteLink'
 import {
   capabilityLamps,
   formatCountdown,
@@ -60,6 +62,8 @@ export function Remote() {
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
   const [clock, setClock] = useState(() => Date.now())
+  /** 外网中继状态。null = 还没拿到（接口 503 或未返回），此时只说「未知」。 */
+  const [tunnel, setTunnel] = useState<TunnelState | null>(null)
 
   const loadCap = useCallback(async () => {
     setCapErr('')
@@ -101,6 +105,24 @@ export function Remote() {
     void loadDevices()
     void loadSessions()
   }, [loadCap, loadDevices, loadSessions])
+
+  // 中继状态：一次就够（隧道重连是后台行为，界面不需要秒级刷新）。
+  // 503 表示这条路由压根没装（旧二进制 / 远程桌面未启用）→ 保持 null，
+  // 界面说「未知」，不说「未配置」——那是两件事。
+  useEffect(() => {
+    let stopped = false
+    void remoteApi
+      .tunnel()
+      .then((t) => {
+        if (!stopped) setTunnel(normalizeTunnel(t))
+      })
+      .catch(() => {
+        if (!stopped) setTunnel(null)
+      })
+    return () => {
+      stopped = true
+    }
+  }, [])
 
   // 会话轮询。页面不可见时不打接口（手机上切后台还在轮询纯属浪费电）。
   useEffect(() => {
@@ -218,6 +240,26 @@ export function Remote() {
     [sessions],
   )
 
+  /**
+   * 「手机现在是怎么连上这台电脑的」。
+   *
+   * 只读 window.location：relay 会把页面放在 /t/<device>/ 前缀下，
+   * 而直连是同源根路径。两件事都影响排障路径，所以必须在这屏说清楚。
+   */
+  const link = useMemo<LinkReport>(
+    () =>
+      describeLink(
+        {
+          protocol: window.location.protocol,
+          host: window.location.host,
+          pathname: window.location.pathname,
+        },
+        tunnel,
+      ),
+    [tunnel],
+  )
+  const accessUrl = tunnel ? relayAccessUrl(tunnel) : ''
+
   if (disabled) {
     return (
       <div className="page remote-page">
@@ -289,6 +331,39 @@ export function Remote() {
         </Notice>
       )}
       {pairErr && <Notice kind="error">生成配对码失败：{pairErr}</Notice>}
+
+      {/* ── 0. 链路状态 ─────────────────────────────────────
+          放在最上面：手机在外网连不上时，第一件要判断的就是「走的是哪条路」。
+          未配置中继时给文档链接，不自己实现地址输入（那是部署配置的事）。 */}
+      <div className={`remote-linkbar ${link.tone}`}>
+        <span className="remote-linkbar-dot" aria-hidden="true" />
+        <div className="remote-linkbar-body">
+          <div className="remote-linkbar-top">
+            <span className="remote-linkbar-label">{link.label}</span>
+            <span className="remote-linkbar-summary">{link.summary}</span>
+          </div>
+          {link.details.length > 0 && (
+            <div className="remote-linkbar-details mono">
+              {link.details.join(' · ')}
+            </div>
+          )}
+          {link.hint && <div className="remote-linkbar-hint">{link.hint}</div>}
+        </div>
+        <div className="remote-linkbar-actions">
+          {accessUrl && (
+            <button
+              className="btn small"
+              title={accessUrl}
+              onClick={() => void copyText(accessUrl)}
+            >
+              复制外网地址
+            </button>
+          )}
+          <a className="btn small" href="#/admin/docs">
+            文档
+          </a>
+        </div>
+      </div>
 
       {/* ── 1. 能力条 ─────────────────────────────────────── */}
       <div className="remote-caps">

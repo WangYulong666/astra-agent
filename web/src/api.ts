@@ -834,6 +834,25 @@ export type RemoteSession = {
   stats: RemoteStats
 }
 
+/**
+ * 外网中继（astra-relay）的隧道状态。GET /v1/remote/tunnel。
+ *
+ * 未配置时后端只回 `{"configured":false}`，其余字段全缺 —— 所以除了
+ * configured 之外都可选。手机经 relay 访问时，页面所在 host 就是 relay，
+ * 用户需要知道「这条链路通不通、设备 id 是什么、断过几次」。
+ */
+export type RemoteTunnel = {
+  configured: boolean
+  connected?: boolean
+  /** relay 的公网地址，例如 https://relay.example.com */
+  url?: string
+  /** 设备 id，决定手机访问路径 /t/<device>/ */
+  deviceId?: string
+  streams?: number
+  reconnects?: number
+  lastError?: string
+}
+
 export type RemoteActionName = 'screenshot' | 'lock' | 'open_app' | 'open_url'
 
 export type RemoteActionResult = {
@@ -898,6 +917,9 @@ export const remoteApi = {
       `/v1/remote/sessions/${encodeURIComponent(id)}/actions`,
       { method: 'POST', body: JSON.stringify({ action, args }) },
     ),
+
+  /** 外网中继状态。旧二进制没有这条路由（503），调用方按「未知」处理。 */
+  tunnel: () => request<RemoteTunnel>('/v1/remote/tunnel'),
 }
 
 /**

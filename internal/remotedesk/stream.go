@@ -2,6 +2,7 @@ package remotedesk
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -33,6 +34,20 @@ const (
 	streamGrabTimeout = 8 * time.Second
 	// streamCloseWait 是 Close 等泵退出的上限，防止异常后端把 Close 挂死。
 	streamCloseWait = 12 * time.Second
+	// streamSuspendBackoff 是「屏幕睡了」时的退避间隔。
+	//
+	// 休眠时单帧 940ms（cgo）或出全黑图（screencapture），按正常帧率空转等于
+	// 把 CPU 打满还发不出画面。2 秒一次足够在屏幕醒来后立刻恢复。
+	streamSuspendBackoff = 2 * time.Second
+	// defaultPolicyFPS 是 Policy.WithDefaults 的 MaxFPS 默认值（10）。
+	// 它按 screencapture 的 110–140ms/帧定的；换成 cgo 后端后默认值太保守。
+	defaultPolicyFPS = 10
+	// fastBackendFPS 是 cgo 后端下的默认上限。
+	//
+	// 实测 44–47ms/帧（抓屏 28–31 + 下采样与编码 16）→ 上限 21–23fps，
+	// 取 20 留一点余量。它**不是**突破 Policy：Policy 显式调高更高值仍然生效，
+	// 只是 ≤10 的值（几乎都是「没配」的默认值）在快后端上被放宽。
+	fastBackendFPS = 20
 
 	inputRateWindow   = time.Second
 	inputRateLogEvery = time.Minute
@@ -49,6 +64,10 @@ func newRuntime(sess Session, pol Policy, cap Capture, in Input, lg *log.Logger,
 	pol = pol.WithDefaults()
 	if lg == nil {
 		lg = log.New(io.Discard, "", 0)
+	}
+	// 快后端（cgo 抓屏）下把默认 10fps 放宽到 20：5fps 的手感问题一半出在这里。
+	if _, ok := cap.(fastGrabber); ok && pol.MaxFPS <= defaultPolicyFPS {
+		pol.MaxFPS = fastBackendFPS
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -109,6 +128,11 @@ type frameRuntime struct {
 	framesSent    atomic.Uint64
 	dropped       atomic.Uint64
 	inputs        atomic.Uint64
+
+	// rtc 是这一路的 WebRTC 通道（懒创建：客户端发 offer 才有）。
+	// 它只影响「额外怎么送帧」，不影响 WS 的 binary 帧——两条路并行。
+	rtcMu sync.Mutex
+	rtc   *rtcSession
 
 	fps     fpsMeter
 	limiter inputLimiter
@@ -223,6 +247,9 @@ func (r *frameRuntime) Close() error {
 	r.closeOnce.Do(func() {
 		r.closed.Store(true)
 		r.cancel()
+		// RTC 通道（如果客户端开了）要一起收掉：PC 不关会一直占着 UDP 端口
+		// 和两条后台 goroutine。
+		r.closeRTC()
 		r.closeSubs()
 		// 等泵退出，保证不留 goroutine（泵里的抓屏会因 ctx 取消而中断）。
 		select {
@@ -236,34 +263,71 @@ func (r *frameRuntime) Close() error {
 
 // ── 抓屏泵 ──────────────────────────────────────────────────────
 
+// pump 是唯一抓屏者。
+//
+// 节拍是**固定周期**而不是「抓完再睡一个间隔」：后者每帧的实际周期是
+// 抓屏耗时 + 间隔。screencapture 时代（110–140ms）这个错误被掩盖了，
+// cgo 后端（40ms）下它会把 20fps 压成 11fps——正好卡在 15fps 验收线以下。
 func (r *frameRuntime) pump() {
 	defer close(r.pumpDone)
 
-	timer := time.NewTimer(0)
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
 	defer timer.Stop()
 
 	fails := 0
 	var lastSent time.Time
+	// next 是下一帧的**目标时刻**（不是「还要等多久」）。
+	var next time.Time
+	// suspended 是「屏幕睡眠」的状态，只用来保证日志打一次：
+	// 醒来第一帧会打一行「恢复」，之后不再重复。
+	suspended := false
 
 	for {
-		select {
-		case <-r.ctx.Done():
-			return
-		case <-timer.C:
-		case <-r.wake:
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
+		// 等到目标时刻；wake 可以提前叫醒（改画质/新订阅要立刻出一帧）。
+		if wait := time.Until(next); wait > 0 {
+			timer.Reset(wait)
+			select {
+			case <-r.ctx.Done():
+				return
+			case <-timer.C:
+			case <-r.wake:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
 				}
+			}
+		} else {
+			select {
+			case <-r.ctx.Done():
+				return
+			case <-r.wake:
+			default:
 			}
 		}
 
+		start := time.Now()
 		opt, force, prev := r.takeGrabState()
 		frame, thumb, err := r.grab(opt)
 		if err != nil {
 			if r.ctx.Err() != nil {
 				return
+			}
+			// 屏幕睡了不是「抓屏故障」：不累加 fails（否则 5 次就判死刑，
+			// 而屏幕休眠是正常的省电行为），退避等它醒。
+			if errors.Is(err, errScreenSuspended) {
+				if !suspended {
+					suspended = true
+					r.logf("屏幕休眠/未授权，暂停抓屏并每 %s 重试一次（恢复后自动继续）：%v",
+						streamSuspendBackoff, err)
+				}
+				fails = 0
+				next = time.Now().Add(streamSuspendBackoff)
+				continue
 			}
 			fails++
 			r.logf("抓屏失败（连续第 %d 次）：%v", fails, err)
@@ -271,8 +335,12 @@ func (r *frameRuntime) pump() {
 				r.fatal(ReasonStreamError)
 				return
 			}
-			timer.Reset(r.frameInterval())
+			next = time.Now().Add(r.frameInterval())
 			continue
+		}
+		if suspended {
+			suspended = false
+			r.logf("屏幕已恢复，继续抓屏")
 		}
 		fails = 0
 
@@ -285,7 +353,12 @@ func (r *frameRuntime) pump() {
 		}
 		r.setPrevThumb(thumb)
 
-		timer.Reset(r.frameInterval())
+		// 目标时刻按「这一帧开始的时间」推一格：抓得比间隔快就睡剩下的部分，
+		// 抓得慢就立刻再抓（绝不补攒，否则延迟越积越大）。
+		next = start.Add(r.frameInterval())
+		if next.Before(time.Now()) {
+			next = time.Now()
+		}
 	}
 }
 
@@ -426,6 +499,7 @@ func (r *frameRuntime) fatal(reason string) {
 		r.logf("抓屏连续失败 %d 次，关闭帧流：%s", streamFatalLimit, reason)
 		r.closed.Store(true)
 		r.cancel()
+		r.closeRTC()
 		r.closeSubs()
 		if r.onFatal != nil {
 			r.onFatal(reason)

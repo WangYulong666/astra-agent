@@ -23,6 +23,7 @@ build: ## 编译全部二进制到 bin/
 	go build -o $(BIN)/acp-shell-agent ./cmd/acp-shell-agent
 	go build -o $(BIN)/astra-sandbox ./cmd/astra-sandbox
 	go build -o $(BIN)/astra-server ./cmd/astra-server
+	go build -o $(BIN)/astra-relay ./cmd/astra-relay
 	go build -o $(BIN)/astra-cli ./cmd/astra-cli
 	@# 文档随二进制分发：astra-server 启动时会同步到 <dataDir>/docs，供文档模块读取。
 	@rm -rf $(BIN)/docs && cp -R docs $(BIN)/docs
@@ -67,6 +68,38 @@ fmt: ## 格式化
 tidy: ## 整理依赖
 	go mod tidy
 	go mod vendor
+
+# ── 中继自检 ──────────────────────────────────────────────────
+#
+# 只验证「能不能在本机把 relay 起起来并响应健康检查」，
+# 真正的端到端（HTTP/WS 过隧道）在 go test ./internal/relay/ 里。
+
+.PHONY: relay-check
+relay-check: ## 中继自检：起 relay → curl /_relay/healthz → 退出
+	@mkdir -p $(BIN)
+	@go build -o $(BIN)/astra-relay ./cmd/astra-relay || exit 1
+	@log=$$(mktemp -t astra-relay.XXXXXX); \
+	$(BIN)/astra-relay -addr 127.0.0.1:0 -token relay-check >"$$log" 2>&1 & \
+	pid=$$!; \
+	cleanup() { kill $$pid 2>/dev/null; wait $$pid 2>/dev/null; rm -f "$$log"; }; \
+	trap cleanup EXIT; \
+	addr=""; \
+	for i in $$(seq 1 30); do \
+	  addr=$$(sed -n 's/.*（实际 \([^）]*\)）.*/\1/p' "$$log" | head -n1); \
+	  [ -n "$$addr" ] && break; \
+	  sleep 0.1; \
+	done; \
+	if [ -z "$$addr" ]; then \
+	  echo "  ✗ relay 3 秒内没有报出监听地址"; sed 's/^/    /' "$$log"; exit 1; \
+	fi; \
+	echo "  relay 已监听 $$addr"; \
+	body=$$(curl -fsS --max-time 3 "http://$$addr/_relay/healthz") || { \
+	  echo "  ✗ curl /_relay/healthz 失败"; sed 's/^/    /' "$$log"; exit 1; }; \
+	case "$$body" in \
+	  *'"ok":true'*) echo "  ✓ healthz: $$body" ;; \
+	  *) echo "  ✗ healthz 响应异常: $$body"; exit 1 ;; \
+	esac; \
+	echo "  relay-check 通过"
 
 # ── M0 验证 ───────────────────────────────────────────────────
 

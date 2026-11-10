@@ -4,7 +4,7 @@ package api
 //
 // 并发模型（这一段是理解本文件的关键，也是这类代码最容易写崩的地方）：
 //
-//	读 goroutine   ── conn.Read ──▶ 处理 input/quality/ping ──▶ textCh
+//	读 goroutine   ── conn.Read ──▶ 处理 input/quality/ping/rtc-offer ──▶ textCh
 //	写 goroutine   ── conn.Write ◀── textCh / frameCh / ticker（stats+ping）
 //	主 goroutine   ── rt.Frames ◀── 抓屏泵 ──▶ frameCh（满了丢最旧）
 //
@@ -15,6 +15,11 @@ package api
 // 三条退出路径（客户端断开 / ctx 取消 / 帧通道关闭）都会走到 remoteStream 的
 // defer：先 conn.Close 再 rt.Close，读 goroutine 因 ctx 取消退出，写 goroutine
 // 同理，不留 goroutine。
+//
+// WebRTC 信令复用这条 WS（不走第二条连接）：客户端发 rtc-offer，这里回
+// rtc-answer 或 rtc-failed。**收到 answer 之后 WS 的 binary 帧照发不误**——
+// 客户端自己决定用哪条路的画面，服务端不做「切换」，因为一旦切了，
+// WebRTC 半路挂掉就会黑屏，而回退路径必须永远可用。
 
 import (
 	"context"
@@ -45,6 +50,10 @@ const (
 	// remoteWSTextQueue 控制消息队列。控制消息不该丢（pong/error 丢了
 	// 前端会以为服务端没反应），所以给一个有界缓冲 + 阻塞入队。
 	remoteWSTextQueue = 16
+
+	// remoteWSRTCTimeout 是服务端处理一次 offer 的上限。里面最多包含
+	// 「等 5s ICE 收集」，20s 是给慢机器留的余量。
+	remoteWSRTCTimeout = 20 * time.Second
 )
 
 // remoteWSHello 连上后的第一帧。
@@ -53,6 +62,9 @@ type remoteWSHello struct {
 	SessionID string           `json:"sessionId"`
 	Mode      string           `json:"mode"`
 	Stats     remotedesk.Stats `json:"stats"`
+	// RTC 表示「本会话可以试着协商 WebRTC」。前端据此决定要不要发 offer；
+	// 它只是能力声明，真正的连通性由 rtc-answer 是否回复决定。
+	RTC bool `json:"rtc"`
 }
 
 // remoteWSStats 周期水位帧。Stats 内联，前端直接读 fps/width/height。
@@ -66,6 +78,20 @@ type remoteWSStats struct {
 type remoteWSError struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
+}
+
+// remoteWSRTCAnswer 协商成功：answer 里已经带上服务端收集好的 ICE 候选
+// （非 trickle，客户端 SetRemoteDescription 之后就能直接连通）。
+type remoteWSRTCAnswer struct {
+	Type string `json:"type"`
+	SDP  string `json:"sdp"`
+}
+
+// remoteWSRTCFailed 协商失败。**不断连**：WS + JPEG 那条路继续跑，
+// 前端拿到这一帧就该退回「用 binary 帧渲染」。
+type remoteWSRTCFailed struct {
+	Type   string `json:"type"`
+	Reason string `json:"reason"`
 }
 
 // remoteOriginPatterns 决定哪些 Origin 允许连画面流。
@@ -184,6 +210,7 @@ func (h *handler) serveRemoteStream(conn *websocket.Conn, rt remotedesk.Runtime,
 		SessionID: sessionID,
 		Mode:      mode,
 		Stats:     rt.Stats(),
+		RTC:       rtcAvailable(rt),
 	})
 
 	go h.remoteWriteLoop(ctx, cancel, conn, rt, textCh, frameCh)
@@ -279,6 +306,16 @@ func (h *handler) remoteReadLoop(ctx context.Context, cancel context.CancelFunc,
 	}
 }
 
+// rtcAvailable 判断这一路能不能协商 WebRTC。
+//
+// 注意用 remotedesk.WebRTCFor 而不是直接的 `rt.(remotedesk.WebRTCProvider)`：
+// manager 会返回 trackedRuntime 包装（用 Runtime 接口字段嵌入），接口字段只
+// 提升 Runtime 的方法，直接断言在真实路径上永远失败。
+func rtcAvailable(rt remotedesk.Runtime) bool {
+	p, ok := remotedesk.WebRTCFor(rt)
+	return ok && p.RTCSupported()
+}
+
 // handleRemoteMessage 处理一条客户端消息。任何失败都只回 error 帧。
 func (h *handler) handleRemoteMessage(ctx context.Context, rt remotedesk.Runtime,
 	textCh chan<- []byte, data []byte) {
@@ -287,9 +324,10 @@ func (h *handler) handleRemoteMessage(ctx context.Context, rt remotedesk.Runtime
 	var msg struct {
 		Type string `json:"type"`
 		remotedesk.InputEvent
-		MaxWidth int `json:"maxWidth"`
-		FPS      int `json:"fps"`
-		Quality  int `json:"quality"`
+		MaxWidth int    `json:"maxWidth"`
+		FPS      int    `json:"fps"`
+		Quality  int    `json:"quality"`
+		SDP      string `json:"sdp"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		pushRemoteText(ctx, textCh, remoteWSError{Type: "error", Message: "消息不是合法 JSON: " + err.Error()})
@@ -310,14 +348,53 @@ func (h *handler) handleRemoteMessage(ctx context.Context, rt remotedesk.Runtime
 		}); err != nil {
 			pushRemoteText(ctx, textCh, remoteWSError{Type: "error", Message: err.Error()})
 		}
+	case "rtc-offer":
+		h.handleRTCOffer(ctx, rt, textCh, msg.SDP)
+	case "rtc-answer":
+		// 客户端把自己收到的 answer 回显回来（有的前端拿它做确认）。服务端
+		// 不需要它，也不回任何东西：binary 帧照发，画面来源由客户端自己选。
 	case "ping":
 		pushRemoteText(ctx, textCh, map[string]string{"type": "pong"})
 	default:
 		pushRemoteText(ctx, textCh, remoteWSError{
 			Type:    "error",
-			Message: "未知消息类型: " + msg.Type + "（支持 input / quality / ping）",
+			Message: "未知消息类型: " + msg.Type + "（支持 input / quality / ping / rtc-offer）",
 		})
 	}
+}
+
+// handleRTCOffer 处理一次 offer。
+//
+// 这里是**同步**的（最长约 5s 等 ICE 收集完），代价是读循环在此期间不处理
+// 后续消息。接受这个代价是因为：协商是一次性动作，而异步化会引入「同时两个
+// offer 争同一个 PC」「answer 顺序错乱」这些状态机问题；写路径依旧只有写
+// goroutine，不受影响。
+func (h *handler) handleRTCOffer(ctx context.Context, rt remotedesk.Runtime,
+	textCh chan<- []byte, offer string) {
+	provider, ok := remotedesk.WebRTCFor(rt)
+	if !ok || !provider.RTCSupported() {
+		// 不支持就明确告诉前端，让它安心用 binary 帧；连接必须留着。
+		pushRemoteText(ctx, textCh, remoteWSRTCFailed{
+			Type:   "rtc-failed",
+			Reason: "本机/本会话不支持 WebRTC（Pion 栈或 UDP 端口不可用）",
+		})
+		return
+	}
+	if strings.TrimSpace(offer) == "" {
+		pushRemoteText(ctx, textCh, remoteWSRTCFailed{Type: "rtc-failed", Reason: "offer 缺少 sdp"})
+		return
+	}
+
+	actx, cancel := context.WithTimeout(ctx, remoteWSRTCTimeout)
+	defer cancel()
+	answer, err := provider.Answer(actx, offer)
+	if err != nil {
+		// 协商失败只回 rtc-failed：WS + JPEG 那条路继续可用，画面不断。
+		h.log.Printf("远程桌面 WebRTC 协商失败: %v", err)
+		pushRemoteText(ctx, textCh, remoteWSRTCFailed{Type: "rtc-failed", Reason: err.Error()})
+		return
+	}
+	pushRemoteText(ctx, textCh, remoteWSRTCAnswer{Type: "rtc-answer", SDP: answer})
 }
 
 func remoteWSWrite(ctx context.Context, conn *websocket.Conn, typ websocket.MessageType, data []byte) error {
