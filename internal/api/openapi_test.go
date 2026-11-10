@@ -164,6 +164,7 @@ var codeRoutes = []string{
 	"DELETE /v1/remote/sessions/{id}",
 	"GET /v1/remote/sessions/{id}/stream",
 	"POST /v1/remote/sessions/{id}/actions",
+	"GET /v1/remote/tunnel",
 
 	// 文档模块（只读，随二进制分发）
 	"GET /v1/docs",

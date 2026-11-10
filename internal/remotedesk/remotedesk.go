@@ -196,6 +196,22 @@ type Stats struct {
 	Inputs  uint64  `json:"inputs"`
 }
 
+// WebRTCProvider 是 Runtime 的**可选**能力：用 WebRTC DataChannel 承载画面与输入。
+//
+// 为什么做成可选接口而不是加进 Runtime：回退路径（WS + JPEG）必须永远可用，
+// 任何一层 WebRTC 起不来时不能让整条会话失败。api 层用类型断言探测。
+//
+// 实现约束：DataChannel 上发的是**单帧 JPEG**（没有纯 Go 的 H.264 编码器，
+// VideoToolbox 是另一个 cgo 项目，本轮不做）。所以 WebRTC 在这里买到的是
+// 「P2P 直连 + SCTP 拥塞控制 + ICE 打洞」，不是带宽优化——带宽仍由 JPEG
+// 质量/分辨率决定。这一点必须写进用户文档，别让人以为开了 WebRTC 就省流量。
+type WebRTCProvider interface {
+	// RTCSupported 表示本机/本会话能协商 WebRTC（例如 ICE 端口可绑定）。
+	RTCSupported() bool
+	// Answer 接收客户端 offer，返回 answer（非 trickle：双方各自聚合候选）。
+	Answer(ctx context.Context, offerSDP string) (answerSDP string, err error)
+}
+
 // Runtime 是一个已打开的会话通道（一个手机客户端对应一个）。
 // 多个客户端可同时 Open 同一会话，抓屏泵共享、各自订阅。
 type Runtime interface {

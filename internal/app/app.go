@@ -34,6 +34,7 @@ import (
 	"github.com/WangYulong666/astra-agent/internal/llmwire"
 	"github.com/WangYulong666/astra-agent/internal/memory"
 	"github.com/WangYulong666/astra-agent/internal/obs"
+	"github.com/WangYulong666/astra-agent/internal/relay"
 	"github.com/WangYulong666/astra-agent/internal/remotedesk"
 	"github.com/WangYulong666/astra-agent/internal/runner"
 	"github.com/WangYulong666/astra-agent/internal/sandbox"
@@ -125,6 +126,8 @@ type Server struct {
 	hints *runner.RuntimeHints
 	// remote 远程桌面；Close 时要先停它（抓屏子进程 + 会话记录）。
 	remote remotedesk.Manager
+	// tunnel 是外网中继隧道（ASTRA_RELAY_URL 配置后才有）。
+	tunnel relay.Tunnel
 	// tracer 是观测出口本体；stopTrace 只停事件桥，不关 worker，
 	// 退出前还要单独调 tracer.Close()（顺序见 Close）。可能是 Disabled 的空实现。
 	tracer trace.Tracer
@@ -447,6 +450,12 @@ func New(cfg Config) (*Server, error) {
 		Collab: coord, Ledger: ledger,
 		Capabilities: caps, SkillHub: skillHub, Insights: insights, Docs: docsLib,
 		Remote: remote,
+		Tunnel: func() relay.TunnelStats {
+			if s.tunnel == nil {
+				return relay.TunnelStats{}
+			}
+			return s.tunnel.Stats()
+		},
 	})
 	if err != nil {
 		st.Close()
@@ -568,6 +577,10 @@ func (s *Server) Close() error {
 	}
 	if s.stopAutoDistill != nil {
 		s.stopAutoDistill()
+	}
+	// 隧道先断：否则 relay 侧会认为设备还在线，手机连上来一直等到超时。
+	if s.tunnel != nil {
+		_ = s.tunnel.Close()
 	}
 	// 远程桌面要最先停：它会拉起 screencapture 子进程，且必须在关存储前结束会话。
 	if s.remote != nil {
@@ -778,4 +791,33 @@ func networkLockEnabled(lg *log.Logger, egCtl egress.Controller) bool {
 	}
 	lg.Printf("⚠ 出网强制边界已开启：沙箱只能连 %s（DNS 与本机回环例外）", egCtl.Addr())
 	return true
+}
+
+// startTunnel 按 ASTRA_RELAY_URL 建立外网中继隧道。
+// 没配就什么也不做（局域网直连仍可用），配置了但连不上只记日志、不阻断启动——
+// 中继是「加分项」，不能因为它挂了导致整个控制面起不来。
+func (s *Server) startTunnel(localAddr string) {
+	url := os.Getenv("ASTRA_RELAY_URL")
+	if url == "" {
+		return
+	}
+	dev := os.Getenv("ASTRA_RELAY_DEVICE")
+	if dev == "" {
+		h, _ := os.Hostname()
+		dev = strings.ToLower(strings.ReplaceAll(h, " ", "-"))
+	}
+	t, err := relay.Dial(relay.TunnelConfig{
+		URL:       url,
+		Token:     os.Getenv("ASTRA_RELAY_TOKEN"),
+		DeviceID:  dev,
+		LocalAddr: localAddr,
+		Logger:    s.lg,
+		Insecure:  os.Getenv("ASTRA_RELAY_INSECURE") != "",
+	})
+	if err != nil {
+		s.lg.Printf("⚠ 外网中继未连上（局域网仍可用）: %v", err)
+		return
+	}
+	s.tunnel = t
+	s.lg.Printf("外网中继已启动：%s（设备 %s）", url, dev)
 }

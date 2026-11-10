@@ -2500,6 +2500,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /v1/remote/tunnel:
+    get:
+      operationId: remote_tunnel
+      summary: "外网中继隧道状态：手机连的是 relay 还是直连。"
+      tags: [Remote]
+      responses:
+        "200":
+          description: "隧道状态（configured=false 表示未配 ASTRA_RELAY_URL）。"
+        "503":
+          description: "能力未启用。"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /v1/openapi.json:
     get:
       operationId: get_openapi

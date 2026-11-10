@@ -31,6 +31,7 @@ import (
 	"github.com/WangYulong666/astra-agent/internal/insight"
 	"github.com/WangYulong666/astra-agent/internal/lifecycle"
 	"github.com/WangYulong666/astra-agent/internal/memory"
+	"github.com/WangYulong666/astra-agent/internal/relay"
 	"github.com/WangYulong666/astra-agent/internal/remotedesk"
 	"github.com/WangYulong666/astra-agent/internal/runner"
 	"github.com/WangYulong666/astra-agent/internal/sandbox"
@@ -94,6 +95,8 @@ type Config struct {
 	Docs doclib.Library
 	// Remote 是远程桌面（手机看/控电脑）。nil 时回 503。
 	Remote remotedesk.Manager
+	// Tunnel 返回外网中继隧道状态；nil 表示没配 ASTRA_RELAY_URL。
+	Tunnel func() relay.TunnelStats
 
 	TraceEndpoint     string
 	TraceDashboardURL string
@@ -253,6 +256,8 @@ func Handler(cfg Config) (http.Handler, error) {
 	// 画面走 WebSocket，浏览器不能自定义 header → 复用一次性票据（同 SSE）。
 	mux.HandleFunc("GET /v1/remote/sessions/{id}/stream", h.authedEvents(h.remoteStream, auth.ActionSessionRead))
 	mux.HandleFunc("POST /v1/remote/sessions/{id}/actions", h.authed(h.remoteAction, auth.ActionSessionCreate))
+	// 中继隧道状态：手机在外网时连的是 relay，运维/排障要能一眼看到。
+	mux.HandleFunc("GET /v1/remote/tunnel", h.authed(h.remoteTunnel, auth.ActionSessionRead))
 
 	// ── 文档模块（只读，随二进制分发）────────────────────────────
 	mux.HandleFunc("GET /v1/docs", h.authed(h.listDocs, auth.ActionSessionRead))
